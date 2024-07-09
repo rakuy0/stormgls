@@ -1,0 +1,25 @@
+[build-system]
+requires = ['setuptools>=68.0.0', 'wheel']
+build-backend = 'setuptools.build_meta'
+
+[project]
+name = 'stormgls'
+version = '2.173.1'
+description = 'LSP Server for Storm via pygls'
+readme = 'README.rst'
+requires-python = '>=3.11'
+license = { text = 'Apache License 2.0' }
+dependencies = [
+    'pygls==1.3.1',
+    'synapse==2.173.1',
+    'lsprotocol==2023.0.1'
+]
+authors = [
+    { name = 'rakuyo', email = 'rakuyo@vertex.link'},
+]
+
+[tool.setuptools.packages.find]
+include = ["stormgls*"]
+
+[project.urls]
+Repository = 'https://github.com/rakuy0/stormgls'
