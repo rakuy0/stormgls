@@ -19,41 +19,6 @@ logging.basicConfig(filename='pygls.log', filemode='w', level=logging.DEBUG)
 
 server = LanguageServer("storm-glass-server", "v0.0.1")
 
-"""
-@server.feature(
-    lsp.TEXT_DOCUMENT_SEMANTIC_TOKENS_FULL,
-    lsp.SemanticTokensLegend(token_types=["function"], token_modifiers=[]),
-
-)
-def semantic_tokens(ls, params):
-    '''
-    This is what LSP uses for things like syntax highlighting...sorta
-    '''
-    ls.show_message("Starting semantic tokens")
-    data = []
-
-    uri = params.text_document.uri
-    doc = ls.workspace.get_document(uri)
-
-    last_line = 0
-    last_start = 0
-
-    data = []
-
-    for lineno, line in enumerate(doc.lines):
-        last_start = 0
-
-        for matcher in TOKENS:
-            for match in matcher.finditer(line):
-                start, end = match.span()
-                data += [(lineno - last_line), (start - last_start), (end - start), 0, 0]
-
-                last_line = lineno
-                last_start = start
-
-    ls.show_message(str(data))
-    return lsp.SemanticTokens(data=data)
-"""
 
 class StormLanguageServer(LanguageServer):
 
@@ -64,6 +29,7 @@ class StormLanguageServer(LanguageServer):
         self.completions = {}
 
     async def loadCompletions(self, core):
+        # TODO: I should probably cache this stuff to only have to pay the startup cost once
         self.completions = {
             'libs': {},
             'types': {},
@@ -129,6 +95,7 @@ async def document_symbol(ls: StormLanguageServer, params: types.DocumentSymbolP
     retn = []
 
     for kid in ls.query.kids:
+        # TODO: Global vars?
         if isinstance(kid, s_ast.Function):
             pos = kid.getPosInfo()
             retn.append(
@@ -166,6 +133,7 @@ async def getTestCore():
 
 @server.feature(types.INITIALIZE)
 async def lsinit(ls: StormLanguageServer, params: types.InitializeParams):
+    # TODO: sure would be neato if I could cache things to avoid brutal startup times
     async with getTestCore() as core:
         await ls.loadCompletions(core)
     ls.show_message('storm ready')
@@ -173,10 +141,10 @@ async def lsinit(ls: StormLanguageServer, params: types.InitializeParams):
 
 def wordAtCursor(line, lineNo, charAt):
     # roll backwards until we hit a space or the start of the line
+    # TODO God this is a hacky mess that turbo sucks
     start = charAt
-    while start > 0:
-        if line[start] == ' ' or line[start] == '\t' or line[start] == '$':
-            start += 1
+    while start > 1:
+        if line[start-1] == ' ' or line[start-1] == '\t' or line[start-1] == '$':
             break
         start -= 1
 
@@ -190,30 +158,32 @@ def wordAtCursor(line, lineNo, charAt):
 
 
 @server.feature(types.TEXT_DOCUMENT_COMPLETION, types.CompletionOptions(trigger_characters=[".", ':']))
-#@server.feature(types.TEXT_DOCUMENT_COMPLETION, types.CompletionOptions())
 async def autocomplete(ls: StormLanguageServer, params: types.CompletionParams):
     uri = params.text_document.uri
     doc = ls.workspace.get_document(uri)
 
-    if params.context is not None:
-        pass
+    if params.position is None:
+        return
+
 
     word = wordAtCursor(doc.lines[params.position.line], params.position.line, params.position.character)
 
+    # TODO: Model elements?
     retn = []
     if word:
         text, pos = word
+        text = text.strip('$')
         for name, valu in ls.completions.get('libs', []).items():
             if name.startswith(text):
                 kind = types.CompletionItemKind.Property
                 if isinstance(valu.get('type'), dict):
-                    if valu['type']['type'] == 'function':
+                    if valu['type'].get('type') == 'function':
                         kind = types.CompletionItemKind.Function
                 retn.append(
                     types.CompletionItem(
                         label=name,
                         kind=kind,
-                        detail=valu['desc'],
+                        detail=valu.get('desc'),
                     )
                 )
     return types.CompletionList(is_incomplete=False, items=retn)
