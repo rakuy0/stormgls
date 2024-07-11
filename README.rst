@@ -25,7 +25,8 @@ To Do List
   - These startup time costs are why autocomplete can be rather finnicky. You have to wait until you get the "storm ready" at the end of the lsinit function to have the completions work properly.
 - Actual plugin installation via something like lazy.nvim
 - Maybe a configuration option to connect to a cortex to pull various commands, extended model elements, etc?
-- Maybe more robustion symbol detection? That way if the file is invalid on start, we can still get something.
+- Maybe more robust symbol detection? That way if the file is invalid on start, we can still get something.
+- Combine this with vim-storm (and update for new keywords?)
 
 Current usage
 -------------
