@@ -1,5 +1,5 @@
+import re
 import sys
-import logging
 import tempfile
 import contextlib
 
@@ -15,10 +15,10 @@ from pygls.workspace import TextDocument
 
 from lsprotocol import types
 
-logging.basicConfig(filename='pygls.log', filemode='w', level=logging.DEBUG)
-
 server = LanguageServer("storm-glass-server", "v0.0.1")
 
+
+WORD = re.compile(r'\$?[\w\:\.]+')
 
 class StormLanguageServer(LanguageServer):
 
@@ -29,11 +29,10 @@ class StormLanguageServer(LanguageServer):
         self.completions = {}
 
     async def loadCompletions(self, core):
-        # TODO: I should probably cache this stuff to only have to pay the startup cost once
         self.completions = {
             'libs': {},
-            'types': {},
-            'model': {},
+            'formtypes': {},
+            'props': {},
         }
         for lib in s_stormtypes.registry.getLibDocs():
             base = '.'.join(lib['path'])
@@ -42,11 +41,14 @@ class StormLanguageServer(LanguageServer):
                 key = '.'.join((base, name))
                 self.completions['libs'][key] = lcl
 
-        self.libs = {
-            'libs': s_stormtypes.registry.getLibDocs(),
-            # 'types': s_stormtypes.registry.getTypeDocs(),
-            'model': await core.getModelDict()
-        }
+        model = await core.getModelDict()
+
+        for formtype, typeinfo in model.get('types', {}).items():
+            self.completions['formtypes'][formtype] = typeinfo['info']['doc']
+
+        for form, info in model.get('forms', {}).items():
+            for propname, propinfo in info['props'].items():
+                self.completions['props'][propinfo['full']] = propinfo.get('doc', '')
 
     def parse(self, document: TextDocument):
         diagnostics = []
@@ -76,7 +78,7 @@ class StormLanguageServer(LanguageServer):
 server = StormLanguageServer("diagnostic-server", "v1")
 
 
-# TODO: Maybe change to on save since parsing isn't instant?
+# TODO: Maybe change to on save?
 @server.feature(types.TEXT_DOCUMENT_DID_OPEN)
 @server.feature(types.TEXT_DOCUMENT_DID_CHANGE)
 async def did_change(ls: StormLanguageServer, params: types.DidOpenTextDocumentParams):
@@ -95,13 +97,28 @@ async def document_symbol(ls: StormLanguageServer, params: types.DocumentSymbolP
     retn = []
 
     for kid in ls.query.kids:
-        # TODO: Global vars?
         if isinstance(kid, s_ast.Function):
             pos = kid.getPosInfo()
             retn.append(
                 types.DocumentSymbol(
                     name=kid.kids[0].value(),
                     kind=types.SymbolKind.Function,
+                    range=types.Range(
+                        start=types.Position(line=pos['lines'][0]-1, character=0),
+                        end=types.Position(line=pos['lines'][1]-1, character=0),
+                    ),
+                    selection_range=types.Range(
+                        start=types.Position(line=pos['lines'][0]-1, character=0),
+                        end=types.Position(line=pos['lines'][1]-1, character=0),
+                    )
+                )
+            )
+        elif isinstance(kid, s_ast.SetVarOper):
+            pos = kid.getPosInfo()
+            retn.append(
+                types.DocumentSymbol(
+                    name=kid.kids[0].value(),
+                    kind=types.SymbolKind.Variable,
                     range=types.Range(
                         start=types.Position(line=pos['lines'][0]-1, character=0),
                         end=types.Position(line=pos['lines'][1]-1, character=0),
@@ -120,7 +137,8 @@ async def document_symbol(ls: StormLanguageServer, params: types.DocumentSymbolP
 async def getTestCore():
     # It's an annoying startup cost, but it's a pretty dumb simple way to get the default model defs
     # TODO: so if we had a cortex connection we could reach out and also autocomplete
-    # package names and stormcmds, non-default model elements, but that might be a tad touchy to do.
+    # package names and stormcmds, non-default model elements, but that might be a tad touchy to do
+    # because I don't wanna touch cred storing
     conf = {
         'health:sysctl:checks': False,
     }
@@ -139,22 +157,15 @@ async def lsinit(ls: StormLanguageServer, params: types.InitializeParams):
     ls.show_message('storm ready')
 
 
-def wordAtCursor(line, lineNo, charAt):
+def wordAtCursor(line, charAt):
     # roll backwards until we hit a space or the start of the line
-    # TODO God this is a hacky mess that turbo sucks
-    start = charAt
-    while start > 1:
-        if line[start-1] == ' ' or line[start-1] == '\t' or line[start-1] == '$':
-            break
-        start -= 1
+    for match in WORD.finditer(line):
+        start = match.start()
+        end = match.end()
+        if start <= charAt <= end:
+            return line[start:end]
 
-    return (
-        line[start:charAt],
-        types.Range(
-            start=types.Position(line=lineNo, character=start),
-            end=types.Position(line=lineNo, character=charAt),
-        ),
-    )
+    return None
 
 
 @server.feature(types.TEXT_DOCUMENT_COMPLETION, types.CompletionOptions(trigger_characters=[".", ':']))
@@ -165,33 +176,55 @@ async def autocomplete(ls: StormLanguageServer, params: types.CompletionParams):
     if params.position is None:
         return
 
+    word = wordAtCursor(doc.lines[params.position.line], params.position.character)
 
-    word = wordAtCursor(doc.lines[params.position.line], params.position.line, params.position.character)
-
-    # TODO: Model elements?
     retn = []
     if word:
-        text, pos = word
-        text = text.strip('$')
-        for name, valu in ls.completions.get('libs', []).items():
-            if name.startswith(text):
-                kind = types.CompletionItemKind.Property
-                if isinstance(valu.get('type'), dict):
-                    if valu['type'].get('type') == 'function':
-                        kind = types.CompletionItemKind.Function
-                retn.append(
-                    types.CompletionItem(
-                        label=name,
-                        kind=kind,
-                        detail=valu.get('desc'),
+        if word[0] == '$':
+            text = word.strip('$')
+            for name, valu in ls.completions.get('libs', {}).items():
+                if name.startswith(text):
+                    kind = types.CompletionItemKind.Property
+                    if isinstance(valu.get('type'), dict):
+                        if valu['type'].get('type') == 'function':
+                            kind = types.CompletionItemKind.Function
+                    retn.append(
+                        types.CompletionItem(
+                            label=name,
+                            kind=kind,
+                            detail=valu.get('desc'),
+                        )
                     )
-                )
+        else:
+            # cmds unless there's a ":" in it, and then it's model elements
+            text = word.strip()
+
+            # BAHAHAHAA this is so slow
+            formtypes = ls.completions.get('formtypes', {})
+            for name, valu in formtypes.items():
+                if name.startswith(text):
+                    retn.append(
+                        types.CompletionItem(
+                            label=name,
+                            kind=types.CompletionItemKind.Field,
+                            detail=valu
+                        )
+                    )
+            props = ls.completions.get('props', {})
+            for name, valu in props.items():
+                if name.startswith(text):
+                    retn.append(
+                        types.CompletionItem(
+                            label=name,
+                            kind=types.CompletionItemKind.Property,
+                            detail=valu
+                        )
+                    )
+
     return types.CompletionList(is_incomplete=False, items=retn)
 
 
 def main(argv):
-    # opts = setup().parse_args(argv)
-
     server.start_io()
 
 
