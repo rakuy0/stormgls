@@ -1,7 +1,7 @@
 stormgls
 =======
 
-A language server implementation
+A language server implementation for storm via pygls.
 
 
 WARNING

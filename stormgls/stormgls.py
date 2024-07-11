@@ -158,7 +158,6 @@ async def lsinit(ls: StormLanguageServer, params: types.InitializeParams):
 
 
 def wordAtCursor(line, charAt):
-    # roll backwards until we hit a space or the start of the line
     for match in WORD.finditer(line):
         start = match.start()
         end = match.end()
@@ -171,7 +170,7 @@ def wordAtCursor(line, charAt):
 @server.feature(types.TEXT_DOCUMENT_COMPLETION, types.CompletionOptions(trigger_characters=[".", ':']))
 async def autocomplete(ls: StormLanguageServer, params: types.CompletionParams):
     uri = params.text_document.uri
-    doc = ls.workspace.get_document(uri)
+    doc = ls.workspace.get_text_document(uri)
 
     if params.position is None:
         return
@@ -196,10 +195,9 @@ async def autocomplete(ls: StormLanguageServer, params: types.CompletionParams):
                         )
                     )
         else:
-            # cmds unless there's a ":" in it, and then it's model elements
             text = word.strip()
 
-            # BAHAHAHAA this is so slow
+            # if it's dumb but it works, how dumb is it really?
             formtypes = ls.completions.get('formtypes', {})
             for name, valu in formtypes.items():
                 if name.startswith(text):
