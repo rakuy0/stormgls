@@ -28,30 +28,27 @@ To Do List
 - Maybe a configuration option to connect to a cortex to pull various commands, extended model elements, etc?
 - Maybe more robust symbol detection? That way if the file is invalid on start, we can still get something.
 - Combine this with vim-storm (and update for new keywords?)
+- Make plugin installation a bit smoother and auto-install python deps if missing
 
-Current usage
--------------
 
-Until I get around to figuring out plugin installation, I'm doing local dev on this via some lua config::
+Installation
+------------
 
-    local lspconfig = require 'lspconfig'
-    local configs = require 'lspconfig.configs'
-    local util = require 'lspconfig.util'
+If you wanna do some dev on this, clone this repo and run::
 
-    configs.storm = {
-      default_config = {
-        cmd = {"python", "/home/rakuyo/code/stormgls/stormgls/stormgls.py"},
-        filetypes = {'storm'},
-        autostart = true,
-        single_file_support = true,
-        root_dir = util.find_git_ancestor,
-        settings = {},
-      },
+    pip install -r requirements.txt
+
+And add something like this to your neovim config::
+
+    return {
+        '/path/to/my/stormgls/',
+        version = '*'
     }
+    
+If you're just using this, you should just be able to do something like this in your neovim instance::
 
-    lspconfig.storm.setup{}
-    vim.cmd("autocmd BufRead,BufNewFile *.storm set filetype=storm")
-
-    vim.lsp.inlay_hint.enable(not vim.lsp.inlay_hint.is_enabled())
-
-Assuming you have the things in requirements.txt installed
+    return {
+        'rakuy0/stormgls',
+        version = '*'
+        build = ':StormUpdate',
+    }
