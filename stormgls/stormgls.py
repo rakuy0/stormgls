@@ -38,7 +38,7 @@ class StormLanguageServer(LanguageServer):
             base = '.'.join(lib['path'])
             for lcl in lib['locals']:
                 name = lcl['name']
-                key = '.'.join((base, name))
+                key = '$' + '.'.join((base, name))
                 self.completions['libs'][key] = lcl
 
         model = await core.getModelDict()
@@ -184,9 +184,8 @@ async def autocomplete(ls: StormLanguageServer, params: types.CompletionParams):
     if atCursor:
         word, rng = atCursor
         if word[0] == '$':
-            text = word.strip('$')
             for name, valu in ls.completions.get('libs', {}).items():
-                if name.startswith(text):
+                if name.startswith(word):
                     kind = types.CompletionItemKind.Property
                     if isinstance(valu.get('type'), dict):
                         if valu['type'].get('type') == 'function':
