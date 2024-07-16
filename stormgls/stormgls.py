@@ -157,12 +157,15 @@ async def lsinit(ls: StormLanguageServer, params: types.InitializeParams):
     ls.show_message('storm ready')
 
 
-def wordAtCursor(line, charAt):
+def wordAtCursor(lineNum, line, charAt):
     for match in WORD.finditer(line):
         start = match.start()
         end = match.end()
         if start <= charAt <= end:
-            return line[start:end]
+            return (line[start:end], types.Range(
+                start=types.Position(line=lineNum, character=start),
+                end=types.Position(line=lineNum, character=end),
+            ))
 
     return None
 
@@ -175,10 +178,11 @@ async def autocomplete(ls: StormLanguageServer, params: types.CompletionParams):
     if params.position is None:
         return
 
-    word = wordAtCursor(doc.lines[params.position.line], params.position.character)
+    atCursor = wordAtCursor(params.position.line, doc.lines[params.position.line], params.position.character)
 
     retn = []
-    if word:
+    if atCursor:
+        word, rng = atCursor
         if word[0] == '$':
             text = word.strip('$')
             for name, valu in ls.completions.get('libs', {}).items():
@@ -192,6 +196,10 @@ async def autocomplete(ls: StormLanguageServer, params: types.CompletionParams):
                             label=name,
                             kind=kind,
                             detail=valu.get('desc'),
+                            text_edit=types.TextEdit(
+                                new_text=name,
+                                range=rng,
+                            )
                         )
                     )
         else:
@@ -205,7 +213,11 @@ async def autocomplete(ls: StormLanguageServer, params: types.CompletionParams):
                         types.CompletionItem(
                             label=name,
                             kind=types.CompletionItemKind.Field,
-                            detail=valu
+                            detail=valu,
+                            text_edit=types.TextEdit(
+                                new_text=name,
+                                range=rng,
+                            )
                         )
                     )
             props = ls.completions.get('props', {})
@@ -215,7 +227,11 @@ async def autocomplete(ls: StormLanguageServer, params: types.CompletionParams):
                         types.CompletionItem(
                             label=name,
                             kind=types.CompletionItemKind.Property,
-                            detail=valu
+                            detail=valu,
+                            text_edit=types.TextEdit(
+                                new_text=name,
+                                range=rng,
+                            )
                         )
                     )
 
