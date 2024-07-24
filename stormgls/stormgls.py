@@ -20,6 +20,7 @@ server = LanguageServer("storm-glass-server", "v0.0.1")
 
 WORD = re.compile(r'\$?[\w\:\.]+')
 
+
 class StormLanguageServer(LanguageServer):
 
     def __init__(self, *args, **kwargs):
@@ -33,6 +34,7 @@ class StormLanguageServer(LanguageServer):
             'libs': {},
             'formtypes': {},
             'props': {},
+            'cmds': {},
         }
         for lib in s_stormtypes.registry.getLibDocs():
             base = '.'.join(lib['path'])
@@ -49,6 +51,10 @@ class StormLanguageServer(LanguageServer):
         for form, info in model.get('forms', {}).items():
             for propname, propinfo in info['props'].items():
                 self.completions['props'][propinfo['full']] = propinfo.get('doc', '')
+
+        for name, ctor in core.stormcmds.items():
+            doc = ctor.getCmdBrief()
+            self.completions['cmds'][name] = doc
 
     def parse(self, document: TextDocument):
         diagnostics = []
@@ -78,9 +84,8 @@ class StormLanguageServer(LanguageServer):
 server = StormLanguageServer("diagnostic-server", "v1")
 
 
-# TODO: Maybe change to on save?
 @server.feature(types.TEXT_DOCUMENT_DID_OPEN)
-@server.feature(types.TEXT_DOCUMENT_DID_CHANGE)
+@server.feature(types.TEXT_DOCUMENT_DID_SAVE)
 async def did_change(ls: StormLanguageServer, params: types.DidOpenTextDocumentParams):
     doc = ls.workspace.get_text_document(params.text_document.uri)
     ls.parse(doc)
@@ -151,7 +156,6 @@ async def getTestCore():
 
 @server.feature(types.INITIALIZE)
 async def lsinit(ls: StormLanguageServer, params: types.InitializeParams):
-    # TODO: sure would be neato if I could cache things to avoid brutal startup times
     async with getTestCore() as core:
         await ls.loadCompletions(core)
     ls.show_message('storm ready')
@@ -178,7 +182,8 @@ async def autocomplete(ls: StormLanguageServer, params: types.CompletionParams):
     if params.position is None:
         return
 
-    atCursor = wordAtCursor(params.position.line, doc.lines[params.position.line], params.position.character)
+    line = params.position.line
+    atCursor = wordAtCursor(line, doc.lines[line], params.position.character)
 
     retn = []
     if atCursor:
@@ -201,6 +206,44 @@ async def autocomplete(ls: StormLanguageServer, params: types.CompletionParams):
                             )
                         )
                     )
+
+            # TODO: detect what function we're in and populate variables based on that
+            # also add global variables to this
+            for kid in ls.query.kids:
+                if isinstance(kid, s_ast.Function):
+                    name = f'${kid.kids[0].value()}'
+                    if name.startswith(word):
+                        retn.append(
+                            types.CompletionItem(
+                                label=name,
+                                kind=types.CompletionItemKind.Function,
+                                text_edit=types.TextEdit(
+                                    new_text=name,
+                                    range=rng,
+                                )
+                            )
+                        )
+
+                    pos = kid.getPosInfo()
+                    start, end = pos['lines']
+                    if start <= line < end:
+                        # TODO: we could also recurse down and find any SetVar opers?
+                        funcargs = [f'${p.value()}' for p in kid.kids[1].kids]
+                        # TODO: Like the issue noted later with commands, we could add our own completion
+                        # type here for parameter (or perhaps that's better left to semantic highlighting?)
+                        for arg in funcargs:
+                            if arg.startswith(word):
+                                retn.append(
+                                    types.CompletionItem(
+                                        label=arg,
+                                        kind=types.CompletionItemKind.Variable,
+                                        text_edit=types.TextEdit(
+                                            new_text=arg,
+                                            range=rng,
+                                        )
+                                    )
+                                )
+
         else:
             text = word.strip()
 
@@ -233,6 +276,26 @@ async def autocomplete(ls: StormLanguageServer, params: types.CompletionParams):
                             )
                         )
                     )
+
+            cmds = ls.completions.get('cmds', {})
+            for name, desc in cmds.items():
+                if name.startswith(text):
+                    # TODO: as part of the LS protocol python pack we could define a custom type
+                    # and use that here, but it's not yet in a proper release, so for now we
+                    # gotta go with something not as accurate.
+                    retn.append(
+                        types.CompletionItem(
+                            label=name,
+                            kind=types.CompletionItemKind.Function,
+                            detail=desc,
+                            text_edit=types.TextEdit(
+                                new_text=name,
+                                range=rng
+                            )
+                        )
+                    )
+
+            # TODO: Keywords?
 
     return types.CompletionList(is_incomplete=False, items=retn)
 

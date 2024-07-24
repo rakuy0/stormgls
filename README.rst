@@ -3,7 +3,6 @@ stormgls
 
 A language server implementation for storm via pygls.
 
-
 WARNING
 -------
 
@@ -28,8 +27,7 @@ To Do List
 - Maybe a configuration option to connect to a cortex to pull various commands, extended model elements, etc?
 - Maybe more robust symbol detection? That way if the file is invalid on start, we can still get something.
 - Combine this with vim-storm (and update for new keywords?)
-- Make plugin installation a bit smoother and auto-install python deps if missing
-
+- semantic highlighting for parameter names and whatnot
 
 Installation
 ------------
