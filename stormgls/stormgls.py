@@ -36,6 +36,7 @@ class StormLanguageServer(LanguageServer):
             'props': {},
             'cmds': {},
         }
+        # TODO: mainline needs an update to include deprecation information in its API
         for lib in s_stormtypes.registry.getLibDocs():
             base = '.'.join(lib['path'])
             for lcl in lib['locals']:
@@ -46,15 +47,25 @@ class StormLanguageServer(LanguageServer):
         model = await core.getModelDict()
 
         for formtype, typeinfo in model.get('types', {}).items():
-            self.completions['formtypes'][formtype] = typeinfo['info']['doc']
+            self.completions['formtypes'][formtype] = {
+                'doc': typeinfo['info'].get('doc', ''),
+                'deprecated': typeinfo['info'].get('deprecated', False)
+            }
 
         for form, info in model.get('forms', {}).items():
             for propname, propinfo in info['props'].items():
-                self.completions['props'][propinfo['full']] = propinfo.get('doc', '')
+                self.completions['props'][propinfo['full']] = {
+                    'doc': propinfo.get('doc', ''),
+                    'deprecated': propinfo.get('deprecated', False)
+                }
 
         for name, ctor in core.stormcmds.items():
             doc = ctor.getCmdBrief()
-            self.completions['cmds'][name] = doc
+            self.completions['cmds'][name] = {
+                'doc': doc,
+                # TODO: I don't believe we have any deprecated commands?
+                'deprecated': False
+            }
 
     def parse(self, document: TextDocument):
         diagnostics = []
@@ -247,6 +258,7 @@ async def autocomplete(ls: StormLanguageServer, params: types.CompletionParams):
         else:
             text = word.strip()
 
+            depr = [types.CompletionItemTag.Deprecated,]
             # if it's dumb but it works, how dumb is it really?
             formtypes = ls.completions.get('formtypes', {})
             for name, valu in formtypes.items():
@@ -255,11 +267,13 @@ async def autocomplete(ls: StormLanguageServer, params: types.CompletionParams):
                         types.CompletionItem(
                             label=name,
                             kind=types.CompletionItemKind.Field,
-                            detail=valu,
+                            detail=valu.get('doc', ''),
                             text_edit=types.TextEdit(
                                 new_text=name,
                                 range=rng,
-                            )
+                            ),
+                            tags=[] if not valu.get('deprecated', False) else depr
+                            # tags=[types.CompletionItemTag.Deprecated]
                         )
                     )
             props = ls.completions.get('props', {})
@@ -269,16 +283,17 @@ async def autocomplete(ls: StormLanguageServer, params: types.CompletionParams):
                         types.CompletionItem(
                             label=name,
                             kind=types.CompletionItemKind.Property,
-                            detail=valu,
+                            detail=valu.get('doc', ''),
                             text_edit=types.TextEdit(
                                 new_text=name,
                                 range=rng,
-                            )
+                            ),
+                            tags=[] if not valu.get('deprecated', False) else depr
                         )
                     )
 
             cmds = ls.completions.get('cmds', {})
-            for name, desc in cmds.items():
+            for name, valu in cmds.items():
                 if name.startswith(text):
                     # TODO: as part of the LS protocol python pack we could define a custom type
                     # and use that here, but it's not yet in a proper release, so for now we
@@ -287,11 +302,12 @@ async def autocomplete(ls: StormLanguageServer, params: types.CompletionParams):
                         types.CompletionItem(
                             label=name,
                             kind=types.CompletionItemKind.Function,
-                            detail=desc,
+                            detail=valu.get('doc', ''),
                             text_edit=types.TextEdit(
                                 new_text=name,
                                 range=rng
-                            )
+                            ),
+                            tags=[] if not valu.get('deprecated', False) else depr
                         )
                     )
 
