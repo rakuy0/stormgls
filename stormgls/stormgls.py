@@ -15,9 +15,6 @@ from pygls.workspace import TextDocument
 
 from lsprotocol import types
 
-server = LanguageServer("storm-glass-server", "v0.0.1")
-
-
 WORD = re.compile(r'\$?[\w\:\.]+')
 
 
@@ -40,15 +37,19 @@ class StormLanguageServer(LanguageServer):
         # TODO: mainline needs an update to include deprecation information in its API
         for (path, lib) in s_stormtypes.registry.iterLibs():
             base = '.'.join(('lib',) + path)
-            libdepr = lib._storm_lib_deprecated
+            libdepr = lib._storm_lib_deprecation is not None
             for lcl in lib._storm_locals:
                 name = lcl['name']
                 key = '$' + '.'.join((base, name))
-                lcldepr = lcl.get('deprecated', False)
+                lcldepr = lcl.get('deprecated')
+                depr = libdepr
+                if lcldepr:
+                    if lcldepr.get('eolvers') or lcldepr.get('eoldate'):
+                        depr = True
                 self.completions['libs'][key] = {
                     'doc': lcl.get('desc'),
                     'type': lcl['type'],
-                    'deprecated': libdepr or lcldepr
+                    'deprecated': depr
                 }
 
         model = await core.getModelDict()
