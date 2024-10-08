@@ -213,7 +213,7 @@ async def autocomplete(ls: StormLanguageServer, params: types.CompletionParams):
                 if name.startswith(word):
                     kind = types.CompletionItemKind.Property
                     if isinstance(valu.get('type'), dict):
-                        if valu['type'] == 'function':
+                        if valu['type'].get('type') == 'function':
                             kind = types.CompletionItemKind.Function
                     retn.append(
                         types.CompletionItem(
