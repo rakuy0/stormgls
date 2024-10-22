@@ -8,6 +8,7 @@ import synapse.cortex as s_cortex
 
 import synapse.lib.ast as s_ast
 import synapse.lib.parser as s_parser
+import synapse.lib.autodoc as s_autodoc
 import synapse.lib.stormtypes as s_stormtypes
 
 from pygls.server import LanguageServer
@@ -17,6 +18,17 @@ from lsprotocol import types
 
 WORD = re.compile(r'\$?[\w\:\.]+')
 
+# Lie to the Cmd objects *just* a tiny bit to use a unified interface to get Cmd arguments
+class FakeSnap:
+    def __init__(self):
+        self.lines = []
+
+    def printf(self, mesg):
+        self.lines.append(mesg)
+
+class FakeRunt:
+    def __init__(self):
+        self.snap = FakeSnap()
 
 class StormLanguageServer(LanguageServer):
 
@@ -34,7 +46,6 @@ class StormLanguageServer(LanguageServer):
             'cmds': {},
         }
 
-        # TODO: mainline needs an update to include deprecation information in its API
         for (path, lib) in s_stormtypes.registry.iterLibs():
             base = '.'.join(('lib',) + path)
             libdepr = lib._storm_lib_deprecation is not None
@@ -61,18 +72,29 @@ class StormLanguageServer(LanguageServer):
             }
 
         for form, info in model.get('forms', {}).items():
+            if not self.completions['formtypes'][form].get('props'):
+                self.completions['formtypes'][form]['props'] = {}
+
             for propname, propinfo in info['props'].items():
-                self.completions['props'][propinfo['full']] = {
+                full = propinfo['full']
+                self.completions['formtypes'][form]['props'][propname] = propinfo
+                self.completions['props'][full] = {
                     'doc': propinfo.get('doc', ''),
-                    'deprecated': propinfo.get('deprecated', False)
+                    'deprecated': propinfo.get('deprecated', False),
+                    'type': propinfo.get('type', {})
                 }
 
+        fake = FakeRunt()
         for name, ctor in core.stormcmds.items():
             doc = ctor.getCmdBrief()
+            cmd = ctor(fake, True)
+            argp = cmd.getArgParser()
+            argp.help()
             self.completions['cmds'][name] = {
                 'doc': doc,
                 # TODO: I don't believe we have any deprecated commands?
-                'deprecated': False
+                'deprecated': False,
+                'help': '\n'.join(argp.mesgs)
             }
 
     def parse(self, document: TextDocument):
@@ -100,7 +122,100 @@ class StormLanguageServer(LanguageServer):
         self.diagnostics[document.uri] = (document.version, diagnostics)
 
 
-server = StormLanguageServer("diagnostic-server", "v1")
+server = StormLanguageServer("storm-language-server", "v1")
+
+
+def _getHoverInfo(ls, word):
+    # TODO: we could propbably use the position info to comb through the AST
+    # to see if we're in a edit block (or part of one) to give docs and autocomplete
+    # for RelProps
+    if word[0] == '$':
+        libs = ls.completions.get('libs')
+        if libs and word in libs:
+            return 'libs', libs[word]
+
+    # full form:prop info
+    props = ls.completions.get('props')
+    if props and word in props:
+        return 'props', props[word]
+
+    # get form info
+    forms = ls.completions.get('formtypes')
+    if forms and word in forms:
+        return 'formtypes', forms[word]
+
+    # get cmd info
+    cmds = ls.completions.get('cmds')
+    if cmds and word in cmds:
+        return 'cmds', cmds[word]
+
+
+@server.feature(types.TEXT_DOCUMENT_HOVER)
+async def hover(ls: StormLanguageServer, params: types.HoverParams):
+    doc = ls.workspace.get_text_document(params.text_document.uri)
+
+    if params.position is None:
+        return
+
+    line = params.position.line
+    atCursor = wordAtCursor(line, doc.lines[line], params.position.character)
+
+    if not atCursor:
+        return
+
+    word, rng = atCursor
+
+    if word[0] == ':':
+        word = word[1:]
+    hinfo = _getHoverInfo(ls, word)
+
+    if not hinfo:
+        return
+
+    typ, info = hinfo
+
+    rtype = info.get('type')
+    desc = info.get('doc')
+
+    if desc:
+        lines = [
+            word,
+            '\n'
+        ]
+        if isinstance(rtype, dict):
+            lines.extend(s_autodoc.prepareRstLines(desc))
+            lines.append('\n')
+            lines.extend(s_autodoc.runtimeGetArgLines(rtype))
+            lines.extend(s_autodoc.runtimeGetReturnLines(rtype))
+        elif typ == 'formtypes':
+            lines.extend(s_autodoc.prepareRstLines(desc))
+            lines.append('\n')
+            lines.append('Props:')
+            for propname, propinfo in info['props'].items():
+                proptype, opts = propinfo['type']
+                propline = f'    :{propinfo["name"]}=<{proptype}>'
+                lines.append(propline)
+                lines.append(f'        {propinfo["doc"]}')
+        elif typ == 'props':
+            lines.extend(s_autodoc.prepareRstLines(desc))
+            lines.append('\n')
+            proptype, opts = info['type']
+            lines.extend(s_autodoc.prepareRstLines(f'Type: {proptype}'))
+            lines.extend(s_autodoc.prepareRstLines(f'Opts: {opts}'))
+        elif typ == 'cmds':
+            lines.append(info.get('help'))
+
+        return types.Hover(
+            # TODO: is there an RST type?
+            contents=types.MarkupContent(
+                kind=types.MarkupKind.Markdown,
+                value='\n'.join(lines),
+            ),
+            range=types.Range(
+                start=types.Position(line=line, character=0),
+                end=types.Position(line=line+1, character=0)
+            )
+        )
 
 
 @server.feature(types.TEXT_DOCUMENT_DID_OPEN)
