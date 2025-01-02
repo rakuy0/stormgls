@@ -113,8 +113,8 @@ class StormLanguageServer(LanguageServer):
                     message=message,
                     severity=severity,
                     range=types.Range(
-                        start=types.Position(line=items['line'], character=items['column']-1),
-                        end=types.Position(line=items['line'], character=items['column'] + len(token)),
+                        start=types.Position(line=items['line'] - 1, character=items['column'] - 1),
+                        end=types.Position(line=items['line'] - 1, character=items['column'] + len(token)),
                     ),
                 )
             )
