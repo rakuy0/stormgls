@@ -18,6 +18,9 @@ from lsprotocol import types
 
 WORD = re.compile(r'\$?[\w\:\.]+')
 
+JSONEXPR = ('lib.null', 'lib.false', 'lib.true')
+
+
 # Lie to the Cmd objects *just* a tiny bit to use a unified interface to get Cmd arguments
 class FakeSnap:
     def __init__(self):
@@ -26,9 +29,17 @@ class FakeSnap:
     def printf(self, mesg):
         self.lines.append(mesg)
 
+
 class FakeRunt:
     def __init__(self):
         self.snap = FakeSnap()
+
+
+def posToRange(pos):
+    return types.Range(
+        start=types.Position(line=pos['lines'][1] - 1, character=pos['columns'][0] - 1),
+        end=types.Position(line=pos['lines'][1] - 1, character=pos['columns'][1] - 1)
+    )
 
 class StormLanguageServer(LanguageServer):
 
@@ -97,12 +108,66 @@ class StormLanguageServer(LanguageServer):
                 'help': '\n'.join(argp.mesgs)
             }
 
+    def cleanCheck(self, query):
+        warnings = []
+
+        todo = []
+        todo.extend(query.kids)
+
+        severity = types.DiagnosticSeverity.Warning
+        while todo:
+            kid = todo.pop(0)
+            if isinstance(kid, s_ast.FuncCall):
+                func = kid.kids[0].getAstText()
+                # TODO: This is super specific. Generalize?
+                if func == 'lib.print' and len(kid.kids[1:]) >= 2:
+                    # CallKwargs are always index 2
+                    if len(kid.kids[2].kids) > 0:
+                        pos = kid.kids[0].getPosInfo()
+                        warnings.append(
+                            types.Diagnostic(
+                                message='Prefer backtick format strings',
+                                severity=severity,
+                                range=posToRange(pos)
+                            )
+                        )
+            elif isinstance(kid, s_ast.Return) and kid.kids:
+                text = kid.kids[0].getAstText()
+                if text == 'lib.null':
+                    pos = kid.getPosInfo()
+                    warnings.append(
+                        types.Diagnostic(
+                            message='Prefer `return()` over `return($lib.null)`',
+                            severity=severity,
+                            range=posToRange(pos)
+                        )
+                    )
+            elif isinstance(kid, s_ast.VarDeref):
+                text = kid.getAstText()
+                pos = kid.getPosInfo()
+                if text in JSONEXPR:
+                    part = text.split('.')[1]
+                    warnings.append(
+                        types.Diagnostic(
+                            message=f'Prefer JSON Expression syntax `({part})` over `${text}`',
+                            severity=severity,
+                            range=posToRange(pos)
+                        )
+                    )
+            else:
+                for k in kid.kids:
+                    todo.append(k)
+
+        return warnings
+
     def parse(self, document: TextDocument):
         diagnostics = []
 
         try:
             query = s_parser.parseQuery(document.source)
             self.query = query
+            # check for some cleanliness
+            diagnostics.extend(self.cleanCheck(query))
         except s_exc.BadSyntax as e:
             items = e.items()
             token = items.get('token', '1')
@@ -235,6 +300,7 @@ async def document_symbol(ls: StormLanguageServer, params: types.DocumentSymbolP
 
     retn = []
 
+    # Top level pass for globals and functions
     for kid in ls.query.kids:
         if isinstance(kid, s_ast.Function):
             pos = kid.getPosInfo()
