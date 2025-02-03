@@ -37,6 +37,7 @@ To Do List
     - Could that be useful for creating a rudimentary type system for storm?
 - edges in completions (when we're in light edge syntax)
 - DIAGNOSTIC - Usage of undeclared variable
+- DIAGNOSTIC - return outside of function warning
 - pygls 2.0 is about to drop, see migration guide: https://pygls.readthedocs.io/en/latest/howto/migrate-to-v2.html
 
 Installation
