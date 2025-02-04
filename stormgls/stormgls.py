@@ -148,7 +148,7 @@ class StormLanguageServer(LanguageServer):
                             range=posToRange(pos)
                         )
                     )
-                elif func in self.completions['libs'] and self.completions['libs'][func].get('deprecated') is not None:
+                elif func in self.completions['libs'] and self.completions['libs'][func].get('deprecated') is True:
                     pos = kid.kids[0].getPosInfo()
                     warnings.append(
                         types.Diagnostic(
