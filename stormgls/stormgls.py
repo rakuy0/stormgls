@@ -118,9 +118,8 @@ class StormLanguageServer(LanguageServer):
         while todo:
             kid = todo.pop(0)
             if isinstance(kid, s_ast.FuncCall):
-                func = kid.kids[0].getAstText()
-                # TODO: This is super specific. Generalize?
-                if func == 'lib.print' and len(kid.kids[1:]) >= 2:
+                func = f'${kid.kids[0].getAstText()}'
+                if func == '$lib.print' and len(kid.kids[1:]) >= 2:
                     # CallKwargs are always index 2
                     if len(kid.kids[2].kids) > 0:
                         pos = kid.kids[0].getPosInfo()
@@ -131,6 +130,33 @@ class StormLanguageServer(LanguageServer):
                                 range=posToRange(pos)
                             )
                         )
+                elif func == '$lib.list':
+                    pos = kid.kids[0].getPosInfo()
+                    warnings.append(
+                        types.Diagnostic(
+                            message=f'{func} is deprecated. Prefer `([])`.',
+                            severity=severity,
+                            range=posToRange(pos)
+                        )
+                    )
+                elif func == '$lib.dict':
+                    pos = kid.kids[0].getPosInfo()
+                    warnings.append(
+                        types.Diagnostic(
+                            message=f'{func} is deprecated. Prefer `({{}})`.',
+                            severity=severity,
+                            range=posToRange(pos)
+                        )
+                    )
+                elif func in self.completions['libs'] and self.completions['libs'][func].get('deprecated') is not None:
+                    pos = kid.kids[0].getPosInfo()
+                    warnings.append(
+                        types.Diagnostic(
+                            message=f'{func} is deprecated',
+                            severity=severity,
+                            range=posToRange(pos)
+                        )
+                    )
             elif isinstance(kid, s_ast.Return) and kid.kids:
                 text = kid.kids[0].getAstText()
                 if text == 'lib.null':
