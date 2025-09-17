@@ -30,16 +30,29 @@ To Do List
 - semantic highlighting for parameter names and whatnot
 - Function call semantics (we could detect things like function calls not matching the number of parameters, maybe show what kind of a function something is?)
 - cache function signatures?
-- renaming would be cool
-- codeLens for some contextual information.
+- renaming would be cool.
+- codeLens for some contextual information
     - we have all the doc info for things like API parameters that we could add in?
         - but generally more SA around API parameters would be neat.
     - Could that be useful for creating a rudimentary type system for storm?
 - edges in completions (when we're in light edge syntax)
+- PERFORMANCE - is there a streaming API to stream back diagnostic messages so the upfront cost is lower? time to "ready" message is awful
 - DIAGNOSTIC - Usage of undeclared variable
 - DIAGNOSTIC - return outside of function warning?
+- DIAGNOSTIC - mismatched numbers of function parameters
+- Context highlighting for dictionaries/libraries/commands
 - Configurable warnings/errors
 - pygls 2.0 is about to drop, see migration guide: https://pygls.readthedocs.io/en/latest/howto/migrate-to-v2.html
+- Deprecated library parameters?
+- Autoformatter (AST -> code printer?)
+- and unused vars
+- local varialbe autocomplete
+- detect that a function doesn't do anything (no return/node lift/etc)?
+- prefer `<(refs)+ $src` over `<(refs)+ { yield $srcnode}`
+- pycharm and vscode integrations?
+- cross file help (and how do we determine import paths?)
+    - assume same dirn? Or scan up for a package.yaml?
+- synapse 3.x compat?
 
 Installation
 ------------

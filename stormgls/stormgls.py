@@ -1,5 +1,8 @@
+
 import re
 import sys
+import enum
+import asyncio
 import tempfile
 import contextlib
 
@@ -19,6 +22,15 @@ from lsprotocol import types
 WORD = re.compile(r'\$?[\w\:\.]+')
 
 JSONEXPR = ('lib.null', 'lib.false', 'lib.true')
+TokenTypes = ["keyword", "variable", "function", "operator", "parameter", "type", "string", "comment", "property", "interface"]
+
+LSSOURCE = "stormgls"
+
+class TokenModifier(enum.IntFlag):
+    deprecated = enum.auto()
+    readonly = enum.auto()
+    defaultLibrary = enum.auto()
+    definition = enum.auto()
 
 
 # Lie to the Cmd objects *just* a tiny bit to use a unified interface to get Cmd arguments
@@ -31,8 +43,10 @@ class FakeSnap:
 
 
 class FakeRunt:
-    def __init__(self):
+    def __init__(self, model):
         self.snap = FakeSnap()
+        self.model = model
+        self.printf = self.snap.printf
 
 
 def posToRange(pos):
@@ -41,6 +55,16 @@ def posToRange(pos):
         end=types.Position(line=pos['lines'][1] - 1, character=pos['columns'][1] - 1)
     )
 
+
+def makeDiagnoticMesg(mesg, pos):
+    return types.Diagnostic(
+        message=mesg,
+        severity=types.DiagnosticSeverity.Warning,
+        range=posToRange(pos),
+        source=LSSOURCE
+    )
+
+
 class StormLanguageServer(LanguageServer):
 
     def __init__(self, *args, **kwargs):
@@ -48,31 +72,43 @@ class StormLanguageServer(LanguageServer):
         self.diagnostics = {}
         self.query = None
         self.completions = {}
+        self.tkns = []
 
     async def loadCompletions(self, core):
+        # TODO: Maybe just change these to properties of the server?
+        # TODO: Also separate out interfaces?
         self.completions = {
             'libs': {},
             'formtypes': {},
             'props': {},
             'cmds': {},
+            'functions': {}
         }
-
         for (path, lib) in s_stormtypes.registry.iterLibs():
             base = '.'.join(('lib',) + path)
             libdepr = lib._storm_lib_deprecation is not None
             for lcl in lib._storm_locals:
                 name = lcl['name']
+                # TODO: clean up $lib vs lib usage/keying
                 key = '$' + '.'.join((base, name))
                 lcldepr = lcl.get('deprecated')
                 depr = libdepr
                 if lcldepr:
                     if lcldepr.get('eolvers') or lcldepr.get('eoldate'):
                         depr = True
-                self.completions['libs'][key] = {
+                type = lcl['type']
+                info = {
                     'doc': lcl.get('desc'),
-                    'type': lcl['type'],
+                    'type': type,
                     'deprecated': depr
                 }
+
+                if isinstance(type, dict) and type.get('type') == 'function':
+                    args = type.get('args', ())
+                    info['args'] = args
+                    info['retn'] = type['returns']
+
+                self.completions['libs'][key] = info
 
         model = await core.getModelDict()
 
@@ -95,7 +131,7 @@ class StormLanguageServer(LanguageServer):
                     'type': propinfo.get('type', {})
                 }
 
-        fake = FakeRunt()
+        fake = FakeRunt(model)
         for name, ctor in core.stormcmds.items():
             doc = ctor.getCmdBrief()
             cmd = ctor(fake, True)
@@ -108,79 +144,123 @@ class StormLanguageServer(LanguageServer):
                 'help': '\n'.join(argp.mesgs)
             }
 
+    def getFuncDefs(self, query):
+        '''
+        Scan through a parsed query and pull out top level function defs,
+        number of args, etc so we can shovel that into the onhover handlers,
+        and do arg count checking
+        '''
+        warnings = []
+        for kid in query.kids:
+            # (name, args, body)
+            if isinstance(kid, s_ast.Function):
+                args = []
+                name = kid.kids[0].getAstText()
+                pos = kid.getPosInfo()
+
+                # This doubles up on first definition?
+                # TODO: need to clear out the completions functions every time
+                if name in self.completions['functions']:
+                    olddef = self.completions['functions'][name]
+                    pos['lines'] = (pos['lines'][0], pos['lines'][0])
+                    warnings.append(makeDiagnoticMesg(f'function {name} is already defined on line {olddef["start"]}', pos))
+                    continue
+
+                # mandatory args are before any CallKwarg structures
+                for arg in kid.kids[1]:
+                    info = {
+                        'name': arg.getAstText()
+                    }
+
+                    if isinstance(arg, s_ast.CallKwarg):
+                        # TODO: doesn't have the leading $
+                        info['default'] = arg.kids[1].getAstText()
+                    args.append(info)
+
+                self.completions['functions'][name] = {
+                    'body': kid.kids[2].getAstText(),
+                    'start': pos['lines'][0],
+                    'end': pos['lines'][1],
+                    'args': args
+                }
+
+        return warnings
+
+    def varcheck(self):
+        '''
+        The right way to do this is via constructing a CFG and rolling backwards to do liveness
+        checks
+        '''
+        pass
+
+    def funcCheck(self, kid):
+        warnings = []
+
+        func = f'${kid.kids[0].getAstText()}'
+        if (func in ('$lib.print', '$lib.warn')) and len(kid.kids[1:]) >= 2:
+            # CallKwargs are always index 2
+            if len(kid.kids[2].kids) > 0:
+                pos = kid.kids[0].getPosInfo()
+                warnings.append(makeDiagnoticMesg('Prefer backtick format strings', pos))
+        elif func == '$lib.list':
+            pos = kid.kids[0].getPosInfo()
+            warnings.append(makeDiagnoticMesg(f'{func} is deprecated. Prefer `([])`.', pos))
+        elif func == '$lib.dict':
+            pos = kid.kids[0].getPosInfo()
+            warnings.append(makeDiagnoticMesg(f'{func} is deprecated. Prefer `({{}})`.', pos))
+        elif func in self.completions['libs']:
+            if self.completions['libs'][func].get('deprecated') is True:
+                pos = kid.kids[0].getPosInfo()
+                warnings.append(f'{func} is deprecated', pos)
+
+        return warnings
+
     def cleanCheck(self, query):
+        '''
+        TODO: clean this up as more of our general "walk all the trees" function
+        '''
         warnings = []
 
         todo = []
         todo.extend(query.kids)
 
-        severity = types.DiagnosticSeverity.Warning
+        # TODO: clean this up and use list.indexOf instead of hardcoding type values
         while todo:
             kid = todo.pop(0)
-            if isinstance(kid, s_ast.FuncCall):
-                func = f'${kid.kids[0].getAstText()}'
-                if func == '$lib.print' and len(kid.kids[1:]) >= 2:
-                    # CallKwargs are always index 2
-                    if len(kid.kids[2].kids) > 0:
-                        pos = kid.kids[0].getPosInfo()
-                        warnings.append(
-                            types.Diagnostic(
-                                message='Prefer backtick format strings',
-                                severity=severity,
-                                range=posToRange(pos)
-                            )
-                        )
-                elif func == '$lib.list':
-                    pos = kid.kids[0].getPosInfo()
-                    warnings.append(
-                        types.Diagnostic(
-                            message=f'{func} is deprecated. Prefer `([])`.',
-                            severity=severity,
-                            range=posToRange(pos)
-                        )
-                    )
-                elif func == '$lib.dict':
-                    pos = kid.kids[0].getPosInfo()
-                    warnings.append(
-                        types.Diagnostic(
-                            message=f'{func} is deprecated. Prefer `({{}})`.',
-                            severity=severity,
-                            range=posToRange(pos)
-                        )
-                    )
-                elif func in self.completions['libs'] and self.completions['libs'][func].get('deprecated') is True:
-                    pos = kid.kids[0].getPosInfo()
-                    warnings.append(
-                        types.Diagnostic(
-                            message=f'{func} is deprecated',
-                            severity=severity,
-                            range=posToRange(pos)
-                        )
-                    )
-            elif isinstance(kid, s_ast.Return) and kid.kids:
-                text = kid.kids[0].getAstText()
-                if text == 'lib.null':
-                    pos = kid.getPosInfo()
-                    warnings.append(
-                        types.Diagnostic(
-                            message='Prefer `return()` over `return($lib.null)`',
-                            severity=severity,
-                            range=posToRange(pos)
-                        )
-                    )
-            elif isinstance(kid, s_ast.VarDeref):
+            pos = kid.getPosInfo()
+
+            if isinstance(kid, s_ast.VarDeref):
                 text = kid.getAstText()
-                pos = kid.getPosInfo()
                 if text in JSONEXPR:
                     part = text.split('.')[1]
-                    warnings.append(
-                        types.Diagnostic(
-                            message=f'Prefer JSON Expression syntax `({part})` over `${text}`',
-                            severity=severity,
-                            range=posToRange(pos)
-                        )
-                    )
+                    warnings.append(makeDiagnoticMesg(f'Prefer JSON Expression syntax `({part})` over `${text}`', pos))
+
+                if text.startswith('lib.'):
+                    self.tkns.append(((pos['lines'][0], pos['columns'][0]), kid, 0))
+                else:
+                    self.tkns.append(((pos['lines'][0], pos['columns'][0]), kid, 8))
             else:
+                if isinstance(kid, s_ast.FuncCall):
+                    warnings.extend(self.funcCheck(kid))
+                    text = kid.getAstText()
+                    # offset the kid iter by 1
+                    if text.startswith('lib.'):
+                        self.tkns.append(((pos['lines'][0], pos['columns'][0]), kid.kids[0], 2))
+                elif isinstance(kid, s_ast.LiftPropBy):
+                    text = kid.kids[0].getAstText()
+                    self.tkns.append(((pos['lines'][0], pos['columns'][0]), kid.kids[0], 8))
+                elif isinstance(kid, s_ast.LiftProp):
+                    text = kid.kids[0].getAstText()
+                    self.tkns.append(((pos['lines'][0], pos['columns'][0]), kid.kids[0], 8))
+                elif isinstance(kid, s_ast.EditNodeAdd):
+                    text = kid.kids[0].getAstText()
+                    self.tkns.append(((pos['lines'][0], pos['columns'][0]), kid.kids[0], 8))
+                elif isinstance(kid, s_ast.Return) and kid.kids:
+                    text = kid.kids[0].getAstText()
+                    pos = kid.kids[0].getPosInfo()
+                    if text == 'lib.null':
+                        warnings.append(makeDiagnoticMesg('Prefer `return()` over `return($lib.null)`', pos))
+
                 for k in kid.kids:
                     todo.append(k)
 
@@ -188,11 +268,14 @@ class StormLanguageServer(LanguageServer):
 
     def parse(self, document: TextDocument):
         diagnostics = []
+        self.completions['functions'] = {}
+        self.tkns = []
 
         try:
             query = s_parser.parseQuery(document.source)
             self.query = query
-            # check for some cleanliness
+            diagnostics.extend(self.getFuncDefs(query))
+            # cleanliness is next to godliness
             diagnostics.extend(self.cleanCheck(query))
         except s_exc.BadSyntax as e:
             items = e.items()
@@ -207,6 +290,7 @@ class StormLanguageServer(LanguageServer):
                         start=types.Position(line=items['line'] - 1, character=items['column'] - 1),
                         end=types.Position(line=items['line'] - 1, character=items['column'] + len(token)),
                     ),
+                    source=LSSOURCE,
                 )
             )
 
@@ -239,6 +323,10 @@ def _getHoverInfo(ls, word):
     cmds = ls.completions.get('cmds')
     if cmds and word in cmds:
         return 'cmds', cmds[word]
+
+    funcs = ls.completions.get('functions')
+    if funcs and word in funcs:
+        return 'function', funcs[word]
 
 
 @server.feature(types.TEXT_DOCUMENT_HOVER)
@@ -311,6 +399,7 @@ async def hover(ls: StormLanguageServer, params: types.HoverParams):
 
 @server.feature(types.TEXT_DOCUMENT_DID_OPEN)
 @server.feature(types.TEXT_DOCUMENT_DID_SAVE)
+@server.feature(types.TEXT_DOCUMENT_DID_CHANGE)
 async def did_change(ls: StormLanguageServer, params: types.DidOpenTextDocumentParams):
     doc = ls.workspace.get_text_document(params.text_document.uri)
     ls.parse(doc)
@@ -328,6 +417,7 @@ async def document_symbol(ls: StormLanguageServer, params: types.DocumentSymbolP
 
     # Top level pass for globals and functions
     for kid in ls.query.kids:
+        await asyncio.sleep(0)
         if isinstance(kid, s_ast.Function):
             pos = kid.getPosInfo()
             retn.append(
@@ -364,6 +454,68 @@ async def document_symbol(ls: StormLanguageServer, params: types.DocumentSymbolP
     return retn
 
 
+@server.feature(
+    types.TEXT_DOCUMENT_SEMANTIC_TOKENS_FULL,
+    types.SemanticTokensLegend(
+        token_types=TokenTypes,
+        token_modifiers=[m.name for m in TokenModifier],
+    )
+)
+async def semantic_tokens(ls: StormLanguageServer, params: types.SemanticTokensParams):
+    '''
+    This looks awkward. Let me explain. The token information is just a big 1D list
+    of integers that only have meaning in groups of 5 (and no, it's not a list of lists)
+
+    TODO: Honestly if I expand this enough, I could just deprecate vim-storm entirely....
+    it would solve some of the nested edit block issues vim-storm has
+
+    On seonc thought, it can still fix the edit block stuff, but since lark doesn't
+    really spit all the lexed items, it skips all the hard coded keywords like "function"
+    '''
+
+    tkns = []
+    prevLine = 0
+    prevOffs = 0
+    stkns = sorted(ls.tkns, key=lambda k: k[0])
+    with open('/home/rakuyo/tmp/lsplog.txt', 'w') as fd:
+        for (line, offs), tkn, type in stkns:
+            line -= 1
+            offs -= 1
+            if line != prevLine:
+                prevOffs = 0
+            txt = tkn.getAstText()
+
+            flags = 0
+            fd.write(f'{txt} - {line} - {type} - {flags}')
+            fd.write('\n')
+            if info := ls.completions['libs'].get(f'${txt}'):
+                flags = 4
+                if not isinstance(info['type'], dict):
+                    type = 1
+            elif info := ls.completions['formtypes'].get(txt):
+                if info.get('deprecated', False) is True:
+                    flags |= 1
+            elif info := ls.completions['props'].get(txt):
+                if info.get('deprecated', False) is True:
+                    flags |= 1
+            else:
+                if type != 8:
+                    flags = 1
+
+            valu = [
+                line - prevLine,
+                offs - prevOffs,
+                len(txt),
+                type,
+                flags
+            ]
+            prevLine = line
+            prevOffs = offs
+            tkns.extend(valu)
+
+    return types.SemanticTokens(data=tkns)
+
+
 @contextlib.asynccontextmanager
 async def getTestCore():
     # It's an annoying startup cost, but it's a pretty dumb simple way to get the default model defs
@@ -382,8 +534,16 @@ async def getTestCore():
 
 @server.feature(types.INITIALIZE)
 async def lsinit(ls: StormLanguageServer, params: types.InitializeParams):
+    '''
+    NOTE: We absolutely cannot have this coroutine yield the IO loop *at all*
+    other other LSP handlers will be allowed to run (like the semantic highlighter)
+    which can lead to annoying cases where a valid lib function could be marked as
+    not existing even though it totally does, all because loadCompletions has not
+    finished running
+    '''
     async with getTestCore() as core:
         await ls.loadCompletions(core)
+
     ls.show_message('storm ready')
 
 
@@ -413,6 +573,7 @@ async def autocomplete(ls: StormLanguageServer, params: types.CompletionParams):
 
     retn = []
     depr = [types.CompletionItemTag.Deprecated,]
+    # TODO: we can probably avoid the default object construction on a lot of these
     if atCursor:
         word, rng = atCursor
         if word[0] == '$':
@@ -434,43 +595,45 @@ async def autocomplete(ls: StormLanguageServer, params: types.CompletionParams):
                             tags=[] if not valu.get('deprecated', False) else depr
                         )
                     )
-
-            # TODO: detect what function we're in and populate variables based on that
-            # also add global variables to this
-            for kid in ls.query.kids:
-                if isinstance(kid, s_ast.Function):
-                    name = f'${kid.kids[0].value()}'
-                    if name.startswith(word):
-                        retn.append(
-                            types.CompletionItem(
-                                label=name,
-                                kind=types.CompletionItemKind.Function,
-                                text_edit=types.TextEdit(
-                                    new_text=name,
-                                    range=rng,
-                                )
-                            )
+            for name, valu in ls.completions.get('functions', {}).items():
+                name = f'${name}'
+                if name.startswith(word):
+                    kind = types.CompletionItemKind.Function
+                    retn.append(
+                        types.CompletionItem(
+                            label=name,
+                            kind=kind,
+                            # Maybe the detail should be the function body? Feels kinda excessive
+                            text_edit=types.TextEdit(
+                                new_text=name,
+                                range=rng,
+                            ),
                         )
+                    )
+                start = valu['start']
+                end = valu['end']
+                if start <= line < end:
+                    args = valu['args']
+                    # TODO: we could also recurse down and find any SetVar opers?
+                    # TODO: Like the issue noted later with commands, we could add our own completion
+                    # type here for parameter (or perhaps that's better left to semantic highlighting?)
 
-                    pos = kid.getPosInfo()
-                    start, end = pos['lines']
-                    if start <= line < end:
-                        # TODO: we could also recurse down and find any SetVar opers?
-                        funcargs = [f'${p.value()}' for p in kid.kids[1].kids]
-                        # TODO: Like the issue noted later with commands, we could add our own completion
-                        # type here for parameter (or perhaps that's better left to semantic highlighting?)
-                        for arg in funcargs:
-                            if arg.startswith(word):
-                                retn.append(
-                                    types.CompletionItem(
-                                        label=arg,
-                                        kind=types.CompletionItemKind.Variable,
-                                        text_edit=types.TextEdit(
-                                            new_text=arg,
-                                            range=rng,
-                                        )
+                    for arg in args:
+                        argname = f"${arg['name']}"
+                        if argname.startswith(word):
+                            retn.append(
+                                types.CompletionItem(
+                                    label=argname,
+                                    kind=types.CompletionItemKind.Variable,
+                                    text_edit=types.TextEdit(
+                                        new_text=argname,
+                                        range=rng,
                                     )
                                 )
+                            )
+
+            # TODO: detect what function we're in and populate variables based on that
+            # TODO: also add global variables to this
 
         else:
             text = word.strip()
