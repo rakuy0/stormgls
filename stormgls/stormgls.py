@@ -1,4 +1,3 @@
-
 import re
 import sys
 import enum
@@ -188,7 +187,7 @@ class StormLanguageServer(LanguageServer):
 
     def varcheck(self):
         '''
-        The right way to do this is via constructing a CFG and rolling backwards to do liveness
+        TODO: The right way to do this is via constructing a CFG and rolling backwards to do liveness
         checks
         '''
         pass
@@ -211,7 +210,7 @@ class StormLanguageServer(LanguageServer):
         elif func in self.completions['libs']:
             if self.completions['libs'][func].get('deprecated') is True:
                 pos = kid.kids[0].getPosInfo()
-                warnings.append(f'{func} is deprecated', pos)
+                warnings.append(makeDiagnoticMesg(f'{func} is deprecated', pos))
 
         return warnings
 
@@ -477,41 +476,40 @@ async def semantic_tokens(ls: StormLanguageServer, params: types.SemanticTokensP
     prevLine = 0
     prevOffs = 0
     stkns = sorted(ls.tkns, key=lambda k: k[0])
-    with open('/home/rakuyo/tmp/lsplog.txt', 'w') as fd:
-        for (line, offs), tkn, type in stkns:
-            line -= 1
-            offs -= 1
-            if line != prevLine:
-                prevOffs = 0
-            txt = tkn.getAstText()
+    for (line, offs), tkn, type in stkns:
+        line -= 1
+        offs -= 1
+        if line != prevLine:
+            prevOffs = 0
+        txt = tkn.getAstText()
 
-            flags = 0
-            fd.write(f'{txt} - {line} - {type} - {flags}')
-            fd.write('\n')
-            if info := ls.completions['libs'].get(f'${txt}'):
-                flags = 4
-                if not isinstance(info['type'], dict):
-                    type = 1
-            elif info := ls.completions['formtypes'].get(txt):
-                if info.get('deprecated', False) is True:
-                    flags |= 1
-            elif info := ls.completions['props'].get(txt):
-                if info.get('deprecated', False) is True:
-                    flags |= 1
-            else:
-                if type != 8:
-                    flags = 1
+        flags = 0
+        if info := ls.completions['libs'].get(f'${txt}'):
+            flags = 4
+            if not isinstance(info['type'], dict):
+                type = 1
+            if info.get('deprecated', False):
+                flags |= 1
+        elif info := ls.completions['formtypes'].get(txt):
+            if info.get('deprecated', False) is True:
+                flags |= 1
+        elif info := ls.completions['props'].get(txt):
+            if info.get('deprecated', False) is True:
+                flags |= 1
+        else:
+            if type != 8:
+                flags = 1
 
-            valu = [
-                line - prevLine,
-                offs - prevOffs,
-                len(txt),
-                type,
-                flags
-            ]
-            prevLine = line
-            prevOffs = offs
-            tkns.extend(valu)
+        valu = [
+            line - prevLine,
+            offs - prevOffs,
+            len(txt),
+            type,
+            flags
+        ]
+        prevLine = line
+        prevOffs = offs
+        tkns.extend(valu)
 
     return types.SemanticTokens(data=tkns)
 
