@@ -226,18 +226,24 @@ class StormLanguageServer(LanguageServer):
         # TODO: clean this up and use list.indexOf instead of hardcoding type values
         while todo:
             kid = todo.pop(0)
-            pos = kid.getPosInfo()
+            try:
+                pos = kid.getPosInfo()
+            except:
+                continue
 
             if isinstance(kid, s_ast.VarDeref):
                 text = kid.getAstText()
                 if text in JSONEXPR:
                     part = text.split('.')[1]
                     warnings.append(makeDiagnoticMesg(f'Prefer JSON Expression syntax `({part})` over `${text}`', pos))
-
-                if text.startswith('lib.'):
                     self.tkns.append(((pos['lines'][0], pos['columns'][0]), kid, 0))
-                else:
-                    self.tkns.append(((pos['lines'][0], pos['columns'][0]), kid, 8))
+
+                elif (lib := self.completions['libs'].get('$' + text)) is not None:
+                    rtype = lib['type']
+                    if isinstance(rtype, dict):
+                        if rtype['type'] != 'function':
+                            self.tkns.append(((pos['lines'][0], pos['columns'][0]), kid, 0))
+
             else:
                 if isinstance(kid, s_ast.FuncCall):
                     warnings.extend(self.funcCheck(kid))
@@ -254,14 +260,26 @@ class StormLanguageServer(LanguageServer):
                 elif isinstance(kid, s_ast.EditNodeAdd):
                     text = kid.kids[0].getAstText()
                     self.tkns.append(((pos['lines'][0], pos['columns'][0]), kid.kids[0], 8))
+                elif isinstance(kid, s_ast.EditEdgeAdd):
+                    edgename = kid.kids[0].getAstText()
+                    n2 = kid.kids[1]
+                    if isinstance(n2, s_ast.SubQuery):
+                        query = n2.kids[0]
+                        if isinstance(query.kids[0], s_ast.YieldValu):
+                            if isinstance(query.kids[0].kids[0], s_ast.VarValue):
+                                vartext = query.kids[0].kids[0].getAstText()
+                                if kid.n2 is True:
+                                    warnings.append(makeDiagnoticMesg(f'Prefer `<({edgename})+ ${vartext}` over `<({edgename})+ {{ yield ${vartext} }}`', pos))
+                                else:
+                                    warnings.append(makeDiagnoticMesg(f'Prefer `+({edgename})> ${vartext}` over `+({edgename})> {{ yield ${vartext} }}`', pos))
                 elif isinstance(kid, s_ast.Return) and kid.kids:
                     text = kid.kids[0].getAstText()
                     pos = kid.kids[0].getPosInfo()
                     if text == 'lib.null':
                         warnings.append(makeDiagnoticMesg('Prefer `return()` over `return($lib.null)`', pos))
 
-                for k in kid.kids:
-                    todo.append(k)
+            for k in kid.kids:
+                todo.append(k)
 
         return warnings
 
@@ -488,7 +506,7 @@ async def semantic_tokens(ls: StormLanguageServer, params: types.SemanticTokensP
             flags = 4
             if not isinstance(info['type'], dict):
                 type = 1
-            if info.get('deprecated', False):
+            if info.get('deprecated', False) is True:
                 flags |= 1
         elif info := ls.completions['formtypes'].get(txt):
             if info.get('deprecated', False) is True:
@@ -687,8 +705,6 @@ async def autocomplete(ls: StormLanguageServer, params: types.CompletionParams):
                             tags=[] if not valu.get('deprecated', False) else depr
                         )
                     )
-
-            # TODO: Keywords?
 
     return types.CompletionList(is_incomplete=False, items=retn)
 
