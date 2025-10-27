@@ -42,7 +42,7 @@ To Do List
 - DIAGNOSTIC - mismatched numbers of function parameters
 - Context highlighting for dictionaries/libraries/commands
 - Configurable warnings/errors
-- pygls 2.0 is has dropped, see migration guide: https://pygls.readthedocs.io/en/latest/howto/migrate-to-v2.html
+- pygls 2.0 is has dropped, see migration guide: https://pygls.readthedocs.io/en/latest/pygls/howto/migrate-to-v2.html
 - Deprecated library parameters?
 - Autoformatter (AST -> code printer?)
 - and unused vars
