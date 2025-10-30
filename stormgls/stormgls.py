@@ -74,7 +74,14 @@ class StormLanguageServer(LanguageServer):
         super().__init__(*args, **kwargs)
         self.diagnostics = {}
         self.query = None
-        self.completions = {}
+        self.completions = {
+            'version': s_version.verstring,
+            'libs': {},
+            'formtypes': {},
+            'props': {},
+            'cmds': {},
+            'functions': {}
+        }
         self.tkns = []
 
     def getFuncDefs(self, query):
@@ -568,6 +575,11 @@ async def saveCompletions(path):
     return completions
 
 
+@server.feature(types.WORKSPACE_DID_CHANGE_CONFIGURATION)
+async def didChangeConfiguration(ls: StormLanguageServer, params: types.DidChangeConfigurationParams):
+    # This is mostly here to prevent an error message in the lsp log
+    pass
+
 @server.feature(types.INITIALIZE)
 async def lsinit(ls: StormLanguageServer, params: types.InitializeParams):
     '''
@@ -577,7 +589,22 @@ async def lsinit(ls: StormLanguageServer, params: types.InitializeParams):
     not existing even though it totally does, all because loadCompletions has not
     finished running
     '''
-    cache = (CWD / 'completions.mpk').absolute()
+    config = await ls.get_configuration_async(
+        types.ConfigurationParams(
+            items=[
+                types.ConfigurationItem(section='datadir')
+            ]
+        )
+    )
+
+    if not config or not config[0]:
+        datadir = CWD
+    else:
+        datadir = pathlib.Path(config[0])
+
+    ls.show_message_log(f'Loading completions from {datadir}')
+
+    cache = (datadir / 'completions.mpk').absolute()
 
     if not cache.exists() or cache.stat().st_size == 0:
         completions = await saveCompletions(cache)
