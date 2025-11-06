@@ -455,9 +455,6 @@ async def semantic_tokens(ls: StormLanguageServer, params: types.SemanticTokensP
         elif info := ls.completions['props'].get(txt):
             if info.get('deprecated', False) is True:
                 flags |= 1
-        else:
-            if type != 8:
-                flags = 1
 
         valu = [
             line - prevLine,
