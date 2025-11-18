@@ -1,7 +1,6 @@
 import re
 import sys
 import enum
-import asyncio
 import pathlib
 import tempfile
 import contextlib
@@ -15,7 +14,7 @@ import synapse.lib.msgpack as s_msgpack
 import synapse.lib.version as s_version
 import synapse.lib.stormtypes as s_stormtypes
 
-from pygls.server import LanguageServer
+from pygls.lsp.server import LanguageServer
 from pygls.workspace import TextDocument
 
 from lsprotocol import types
@@ -426,7 +425,13 @@ async def did_change(ls: StormLanguageServer, params: types.DidOpenTextDocumentP
     ls.parse(doc)
 
     for uri, (version, diagnostics) in ls.diagnostics.items():
-        ls.publish_diagnostics(uri=uri, version=version, diagnostics=diagnostics)
+        ls.text_document_publish_diagnostics(
+            types.PublishDiagnosticsParams(
+                uri=uri,
+                version=version,
+                diagnostics=diagnostics,
+            )
+        )
 
 
 @server.feature(types.TEXT_DOCUMENT_DOCUMENT_SYMBOL)
@@ -536,7 +541,8 @@ async def loadCompletions(core):
         'formtypes': {},
         'props': {},
         'cmds': {},
-        'functions': {}
+        'functions': {},
+        'globals': {}
     }
     for (path, lib) in s_stormtypes.registry.iterLibs():
         base = '.'.join(('lib',) + path)
@@ -614,6 +620,7 @@ async def didChangeConfiguration(ls: StormLanguageServer, params: types.DidChang
     # This is mostly here to prevent an error message in the lsp log
     pass
 
+
 @server.feature(types.INITIALIZE)
 async def lsinit(ls: StormLanguageServer, params: types.InitializeParams):
     '''
@@ -623,7 +630,7 @@ async def lsinit(ls: StormLanguageServer, params: types.InitializeParams):
     not existing even though it totally does, all because loadCompletions has not
     finished running
     '''
-    config = await ls.get_configuration_async(
+    config = await ls.workspace_configuration_async(
         types.ConfigurationParams(
             items=[
                 types.ConfigurationItem(section='datadir')
@@ -636,7 +643,9 @@ async def lsinit(ls: StormLanguageServer, params: types.InitializeParams):
     else:
         datadir = pathlib.Path(config[0])
 
-    ls.show_message_log(f'Loading completions from {datadir}')
+    ls.window_log_message(
+        types.LogMessageParams(type=types.MessageType.Info, message=f'Loading completions from {datadir}')
+    )
 
     cache = (datadir / 'completions.mpk').absolute()
 
@@ -648,12 +657,18 @@ async def lsinit(ls: StormLanguageServer, params: types.InitializeParams):
         completions = s_msgpack.un(cache.read_bytes())
 
         if (version := completions['version']) != s_version.verstring:
-            ls.show_message(f'Updating completion cache from {version} to {s_version.verstring}')
+            ls.window_log_message(
+                types.LogMessageParams(type=types.MessageType.Info, message=f'Updating completion cache from {version} to {s_version.verstring}')
+            )
             completions = await saveCompletions(cache)
 
     ls.completions = completions
+    if 'globals' not in ls.completions:
+        ls.completions['globals'] = {}
 
-    ls.show_message('storm ready')
+    ls.window_log_message(
+        types.LogMessageParams(type=types.MessageType.Info, message='storm ready')
+    )
 
 
 def wordAtCursor(lineNum, line, charAt):
