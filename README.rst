@@ -22,11 +22,9 @@ You're going to want some autocomplete plugin like nvim-cmp:
 To Do List
 ----------
 
-- Cache things like the model and autocomplete so the startup times aren't awful.
 - These startup time costs are why autocomplete can be rather finnicky. You have to wait until you get the "storm ready" at the end of the lsinit function to have the completions work properly.
 - Maybe a configuration option to connect to a cortex to pull various commands, extended model elements, etc?
 - Maybe more robust symbol detection? That way if the file is invalid on start, we can still get something.
-- Combine this with vim-storm
 - semantic highlighting for parameter names and whatnot
 - Function call semantics (we could detect things like function calls not matching the number of parameters, maybe show what kind of a function something is?)
 - cache function signatures?
@@ -36,22 +34,19 @@ To Do List
         - but generally more SA around API parameters would be neat.
     - Could that be useful for creating a rudimentary type system for storm?
 - edges in completions (when we're in light edge syntax)
-- PERFORMANCE - is there a streaming API to stream back diagnostic messages so the upfront cost is lower? time to "ready" message is awful
 - DIAGNOSTIC - Usage of undeclared variable
 - DIAGNOSTIC - return outside of function warning?
-- DIAGNOSTIC - mismatched numbers of function parameters
-- Context highlighting for dictionaries/libraries/commands
 - Configurable warnings/errors
 - pygls 2.0 is has dropped, see migration guide: https://pygls.readthedocs.io/en/latest/pygls/howto/migrate-to-v2.html
 - Deprecated library parameters?
 - Autoformatter (AST -> code printer?)
-- and unused vars
-- local variable autocomplete?
+- local variable autocomplete (and unused variables/sets)?
 - detect that a function doesn't do anything (no return/node lift/etc)?
 - pycharm and vscode integrations?
 - cross file help (and how do we determine import paths?)
     - assume same dirn? Or scan up for a package.yaml?
 - synapse 3.x compat?
+- Detect hardcoded GUID values
 
 Installation
 ------------
