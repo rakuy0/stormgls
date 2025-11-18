@@ -437,7 +437,7 @@ async def did_change(ls: StormLanguageServer, params: types.DidOpenTextDocumentP
 @server.feature(types.TEXT_DOCUMENT_DOCUMENT_SYMBOL)
 async def document_symbol(ls: StormLanguageServer, params: types.DocumentSymbolParams):
     '''
-    This is not autocomplete. This is for Symbol Explorers like aerial.nvim
+    This is not for autocomplete. This is for Symbol Explorers like aerial.nvim.
     '''
     if not ls.query:
         return None
@@ -784,7 +784,8 @@ async def autocomplete(ls: StormLanguageServer, params: types.CompletionParams):
                                 )
                             )
 
-            # add a few of the predefined ones like $node and $path
+            # add a few of the predefined ones.
+            # TODO: Check for others
             for name in ('$node', '$path'):
                 if name.startswith(word):
                     retn.append(
@@ -814,7 +815,6 @@ async def autocomplete(ls: StormLanguageServer, params: types.CompletionParams):
                                 range=rng,
                             ),
                             tags=[] if not valu.get('deprecated', False) else depr
-                            # tags=[types.CompletionItemTag.Deprecated]
                         )
                     )
             props = ls.completions.get('props', {})
@@ -837,8 +837,7 @@ async def autocomplete(ls: StormLanguageServer, params: types.CompletionParams):
             for name, valu in cmds.items():
                 if name.startswith(text):
                     # TODO: as part of the LS protocol python pack we could define a custom type
-                    # and use that here, but it's not yet in a proper release, so for now we
-                    # gotta go with something not as accurate.
+                    # and use that here? Would be annoying though
                     retn.append(
                         types.CompletionItem(
                             label=name,
