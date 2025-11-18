@@ -1,7 +1,6 @@
 import re
 import sys
 import enum
-import asyncio
 import tempfile
 import contextlib
 
@@ -69,12 +68,12 @@ def makeDocSymbol(name, kind, info):
         name=name,
         kind=kind,
         range=types.Range(
-            start=types.Position(line=info['start'] - 1, character=info['colstart']),
-            end=types.Position(line=info['end'] - 1, character=info['colend']),
+            start=types.Position(line=info['start'] - 1, character=info['colstart'] - 1),
+            end=types.Position(line=info['end'] - 1, character=info['colend'] - 1),
         ),
         selection_range=types.Range(
-            start=types.Position(line=info['start'] - 1, character=info['colstart']),
-            end=types.Position(line=info['end'] - 1, character=info['colend']),
+            start=types.Position(line=info['start'] - 1, character=info['colstart'] - 1),
+            end=types.Position(line=info['end'] - 1, character=info['colend'] - 1),
         )
     )
 
@@ -169,13 +168,25 @@ class StormLanguageServer(LanguageServer):
         todo.extend(func.kids)
         while todo:
             kid = todo.pop(0)
-            # we don't cross subquery boundaries right now (those need their own scoping).
-            if kid.hasAstClass(s_ast.SubQuery):
-                continue
 
-            if kid.hasAstClass(s_ast.SetVarOper):
-                name = kid.kids[0].value()
-                retn[name] = kid.getPosInfo()
+            if isinstance(kid, s_ast.SetVarOper):
+                if isinstance(kid.kids[0], s_ast.VarList):
+                    for name in kid.kids[0].value():
+                        retn[name] = kid.getPosInfo()
+                else:
+                    name = kid.kids[0].value()
+                    retn[name] = kid.getPosInfo()
+
+            if isinstance(kid, s_ast.ForLoop):
+                it = kid.kids[0]
+
+                if isinstance(it, s_ast.VarList):
+                    for kidname in it.value():
+                        retn[kidname] = kid.getPosInfo()
+                else:
+                    retn[kid.kids[0].value()] = kid.kids[0].getPosInfo()
+
+            todo.extend(kid.kids)
 
         return retn
 
@@ -188,7 +199,7 @@ class StormLanguageServer(LanguageServer):
         warnings = []
         for kid in query.kids:
             # (name, args, body)
-            if kid.hasAstClass(s_ast.Function):
+            if isinstance(kid, s_ast.Function):
                 args = []
                 name = kid.kids[0].getAstText()
                 pos = kid.getPosInfo()
@@ -222,7 +233,7 @@ class StormLanguageServer(LanguageServer):
                     'vars': self._collectFuncVars(kid)
                 }
 
-            elif kid.hasAstClass(s_ast.SetVarOper):
+            elif isinstance(kid, s_ast.SetVarOper):
                 name = kid.kids[0].getAstText()
                 pos = kid.getPosInfo()
 
@@ -635,17 +646,29 @@ async def autocomplete(ls: StormLanguageServer, params: types.CompletionParams):
                             tags=[] if not valu.get('deprecated', False) else depr
                         )
                     )
-
-            # TODO: would be quicker to have some kind of interval index to immediately jump
-            # to the right function
-            for name, valu in ls.completions.get('functions', {}).items():
+            for name, valu in ls.completions.get('globals', {}).items():
                 name = f'${name}'
                 if name.startswith(word):
-                    kind = types.CompletionItemKind.Function
                     retn.append(
                         types.CompletionItem(
                             label=name,
-                            kind=kind,
+                            kind=types.CompletionItemKind.Variable,
+                            text_edit=types.TextEdit(
+                                new_text=name,
+                                range=rng,
+                            ),
+                        )
+                    )
+
+            # TODO: would be quicker to have some kind of interval index to immediately jump
+            # to the right function
+            for funcname, valu in ls.completions.get('functions', {}).items():
+                name = f'${funcname}'
+                if name.startswith(word):
+                    retn.append(
+                        types.CompletionItem(
+                            label=name,
+                            kind=types.CompletionItemKind.Function,
                             # Maybe the detail should be the function body? Feels kinda excessive
                             text_edit=types.TextEdit(
                                 new_text=name,
@@ -673,10 +696,34 @@ async def autocomplete(ls: StormLanguageServer, params: types.CompletionParams):
                                     )
                                 )
                             )
+                    vars = ls.completions['functions'][funcname]['vars']
+                    for varname, info in vars.items():
+                        compname = f'${varname}'
+                        if compname.startswith(word):
+                            retn.append(
+                                types.CompletionItem(
+                                    label=compname,
+                                    kind=types.CompletionItemKind.Variable,
+                                    text_edit=types.TextEdit(
+                                        new_text=compname,
+                                        range=rng,
+                                    )
+                                )
+                            )
 
-            # TODO: detect what function we're in and populate variables based on that
-            # TODO: also add global variables to this
-
+            # add a few of the predefined ones like $node and $path
+            for name in ('$node', '$path'):
+                if name.startswith(word):
+                    retn.append(
+                        types.CompletionItem(
+                            label=name,
+                            kind=types.CompletionItemKind.Variable,
+                            text_edit=types.TextEdit(
+                                new_text=name,
+                                range=rng,
+                            )
+                        )
+                    )
         else:
             text = word.strip()
 
