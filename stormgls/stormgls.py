@@ -1,15 +1,18 @@
 import re
 import sys
 import enum
+import asyncio
+import pathlib
 import tempfile
 import contextlib
 
 import synapse.exc as s_exc
-import synapse.cortex as s_cortex
 
 import synapse.lib.ast as s_ast
 import synapse.lib.parser as s_parser
 import synapse.lib.autodoc as s_autodoc
+import synapse.lib.msgpack as s_msgpack
+import synapse.lib.version as s_version
 import synapse.lib.stormtypes as s_stormtypes
 
 from pygls.server import LanguageServer
@@ -23,6 +26,8 @@ JSONEXPR = ('lib.null', 'lib.false', 'lib.true')
 TokenTypes = ["keyword", "variable", "function", "operator", "parameter", "type", "string", "comment", "property", "interface"]
 
 LSSOURCE = "stormgls"
+
+CWD = pathlib.Path(__file__).parent.absolute()
 
 class TokenModifier(enum.IntFlag):
     deprecated = enum.auto()
@@ -83,12 +88,8 @@ class StormLanguageServer(LanguageServer):
         super().__init__(*args, **kwargs)
         self.diagnostics = {}
         self.query = None
-        self.completions = {}
-        self.tkns = []
-
-    async def loadCompletions(self, core):
-        # TODO: Also separate out interfaces?
         self.completions = {
+            'version': s_version.verstring,
             'libs': {},
             'formtypes': {},
             'props': {},
@@ -96,65 +97,7 @@ class StormLanguageServer(LanguageServer):
             'functions': {},
             'globals': {}
         }
-        for (path, lib) in s_stormtypes.registry.iterLibs():
-            base = '.'.join(('lib',) + path)
-            libdepr = lib._storm_lib_deprecation is not None
-            for lcl in lib._storm_locals:
-                name = lcl['name']
-                # TODO: clean up $lib vs lib usage/keying
-                key = '$' + '.'.join((base, name))
-                lcldepr = lcl.get('deprecated')
-                depr = libdepr
-                if lcldepr:
-                    if lcldepr.get('eolvers') or lcldepr.get('eoldate'):
-                        depr = True
-                type = lcl['type']
-                info = {
-                    'doc': lcl.get('desc'),
-                    'type': type,
-                    'deprecated': depr
-                }
-
-                if isinstance(type, dict) and type.get('type') == 'function':
-                    args = type.get('args', ())
-                    info['args'] = args
-                    info['retn'] = type['returns']
-
-                self.completions['libs'][key] = info
-
-        model = await core.getModelDict()
-
-        for formtype, typeinfo in model.get('types', {}).items():
-            self.completions['formtypes'][formtype] = {
-                'doc': typeinfo['info'].get('doc', ''),
-                'deprecated': typeinfo['info'].get('deprecated', False)
-            }
-
-        for form, info in model.get('forms', {}).items():
-            if not self.completions['formtypes'][form].get('props'):
-                self.completions['formtypes'][form]['props'] = {}
-
-            for propname, propinfo in info['props'].items():
-                full = propinfo['full']
-                self.completions['formtypes'][form]['props'][propname] = propinfo
-                self.completions['props'][full] = {
-                    'doc': propinfo.get('doc', ''),
-                    'deprecated': propinfo.get('deprecated', False),
-                    'type': propinfo.get('type', {})
-                }
-
-        fake = FakeRunt(model)
-        for name, ctor in core.stormcmds.items():
-            doc = ctor.getCmdBrief()
-            cmd = ctor(fake, True)
-            argp = cmd.getArgParser()
-            argp.help()
-            self.completions['cmds'][name] = {
-                'doc': doc,
-                # TODO: I don't believe we have any deprecated commands?
-                'deprecated': False,
-                'help': '\n'.join(argp.mesgs)
-            }
+        self.tkns = []
 
     def _collectFuncVars(self, func):
         '''
@@ -549,9 +492,6 @@ async def semantic_tokens(ls: StormLanguageServer, params: types.SemanticTokensP
         elif info := ls.completions['props'].get(txt):
             if info.get('deprecated', False) is True:
                 flags |= 1
-        else:
-            if type != 8:
-                flags = 1
 
         valu = [
             line - prevLine,
@@ -569,6 +509,10 @@ async def semantic_tokens(ls: StormLanguageServer, params: types.SemanticTokensP
 
 @contextlib.asynccontextmanager
 async def getTestCore():
+
+    # Import this here to save some import times on startup
+    import synapse.cortex as s_cortex
+
     # It's an annoying startup cost, but it's a pretty dumb simple way to get the default model defs
     # TODO: so if we had a cortex connection we could reach out and also autocomplete
     # package names and stormcmds, non-default model elements, but that might be a tad touchy to do
@@ -583,6 +527,93 @@ async def getTestCore():
             yield core
 
 
+async def loadCompletions(core):
+    # TODO: Maybe just change these to properties of the server?
+    # TODO: Also separate out interfaces?
+    completions = {
+        'version': s_version.verstring,
+        'libs': {},
+        'formtypes': {},
+        'props': {},
+        'cmds': {},
+        'functions': {}
+    }
+    for (path, lib) in s_stormtypes.registry.iterLibs():
+        base = '.'.join(('lib',) + path)
+        libdepr = lib._storm_lib_deprecation is not None
+        for lcl in lib._storm_locals:
+            name = lcl['name']
+            # TODO: clean up $lib vs lib usage/keying
+            key = '$' + '.'.join((base, name))
+            lcldepr = lcl.get('deprecated')
+            depr = libdepr
+            if lcldepr:
+                if lcldepr.get('eolvers') or lcldepr.get('eoldate'):
+                    depr = True
+            type = lcl['type']
+            info = {
+                'doc': lcl.get('desc'),
+                'type': type,
+                'deprecated': depr
+            }
+
+            if isinstance(type, dict) and type.get('type') == 'function':
+                args = type.get('args', ())
+                info['args'] = args
+                info['retn'] = type['returns']
+
+            completions['libs'][key] = info
+
+    model = await core.getModelDict()
+
+    for formtype, typeinfo in model.get('types', {}).items():
+        completions['formtypes'][formtype] = {
+            'doc': typeinfo['info'].get('doc', ''),
+            'deprecated': typeinfo['info'].get('deprecated', False)
+        }
+
+    for form, info in model.get('forms', {}).items():
+        if not completions['formtypes'][form].get('props'):
+            completions['formtypes'][form]['props'] = {}
+
+        for propname, propinfo in info['props'].items():
+            full = propinfo['full']
+            completions['formtypes'][form]['props'][propname] = propinfo
+            completions['props'][full] = {
+                'doc': propinfo.get('doc', ''),
+                'deprecated': propinfo.get('deprecated', False),
+                'type': propinfo.get('type', {})
+            }
+
+    fake = FakeRunt(model)
+    for name, ctor in core.stormcmds.items():
+        doc = ctor.getCmdBrief()
+        cmd = ctor(fake, True)
+        argp = cmd.getArgParser()
+        argp.help()
+        completions['cmds'][name] = {
+            'doc': doc,
+            # TODO: I don't believe we have any deprecated commands?
+            'deprecated': False,
+            'help': '\n'.join(argp.mesgs)
+        }
+
+    return completions
+
+
+async def saveCompletions(path):
+    async with getTestCore() as core:
+        completions = await loadCompletions(core)
+        path.write_bytes(s_msgpack.en(completions))
+
+    return completions
+
+
+@server.feature(types.WORKSPACE_DID_CHANGE_CONFIGURATION)
+async def didChangeConfiguration(ls: StormLanguageServer, params: types.DidChangeConfigurationParams):
+    # This is mostly here to prevent an error message in the lsp log
+    pass
+
 @server.feature(types.INITIALIZE)
 async def lsinit(ls: StormLanguageServer, params: types.InitializeParams):
     '''
@@ -592,8 +623,35 @@ async def lsinit(ls: StormLanguageServer, params: types.InitializeParams):
     not existing even though it totally does, all because loadCompletions has not
     finished running
     '''
-    async with getTestCore() as core:
-        await ls.loadCompletions(core)
+    config = await ls.get_configuration_async(
+        types.ConfigurationParams(
+            items=[
+                types.ConfigurationItem(section='datadir')
+            ]
+        )
+    )
+
+    if not config or not config[0]:
+        datadir = CWD
+    else:
+        datadir = pathlib.Path(config[0])
+
+    ls.show_message_log(f'Loading completions from {datadir}')
+
+    cache = (datadir / 'completions.mpk').absolute()
+
+    if not cache.exists() or cache.stat().st_size == 0:
+        completions = await saveCompletions(cache)
+
+    else:
+        # ls.show_message(f'Loading {cache} {cache.stat().st_size}')
+        completions = s_msgpack.un(cache.read_bytes())
+
+        if (version := completions['version']) != s_version.verstring:
+            ls.show_message(f'Updating completion cache from {version} to {s_version.verstring}')
+            completions = await saveCompletions(cache)
+
+    ls.completions = completions
 
     ls.show_message('storm ready')
 
