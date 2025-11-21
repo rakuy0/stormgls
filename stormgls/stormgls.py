@@ -1,7 +1,6 @@
 import re
 import sys
 import enum
-import asyncio
 import pathlib
 import tempfile
 import contextlib
@@ -15,7 +14,7 @@ import synapse.lib.msgpack as s_msgpack
 import synapse.lib.version as s_version
 import synapse.lib.stormtypes as s_stormtypes
 
-from pygls.server import LanguageServer
+from pygls.lsp.server import LanguageServer
 from pygls.workspace import TextDocument
 
 from lsprotocol import types
@@ -68,6 +67,20 @@ def makeDiagnoticMesg(mesg, pos):
     )
 
 
+def makeDocSymbol(name, kind, info):
+    return types.DocumentSymbol(
+        name=name,
+        kind=kind,
+        range=types.Range(
+            start=types.Position(line=info['start'] - 1, character=info['colstart'] - 1),
+            end=types.Position(line=info['end'] - 1, character=info['colend'] - 1),
+        ),
+        selection_range=types.Range(
+            start=types.Position(line=info['start'] - 1, character=info['colstart'] - 1),
+            end=types.Position(line=info['end'] - 1, character=info['colend'] - 1),
+        )
+    )
+
 class StormLanguageServer(LanguageServer):
 
     def __init__(self, *args, **kwargs):
@@ -80,11 +93,46 @@ class StormLanguageServer(LanguageServer):
             'formtypes': {},
             'props': {},
             'cmds': {},
-            'functions': {}
+            'functions': {},
+            'globals': {}
         }
         self.tkns = []
 
-    def getFuncDefs(self, query):
+    def _collectFuncVars(self, func):
+        '''
+        Collect all the SetVar opers in a function
+        And also allow for the autodefined vars like $node and $path
+        Might need some specil handling for things like for loops
+        '''
+        retn = {}
+
+        todo = []
+        todo.extend(func.kids)
+        while todo:
+            kid = todo.pop(0)
+
+            if isinstance(kid, s_ast.SetVarOper):
+                if isinstance(kid.kids[0], s_ast.VarList):
+                    for name in kid.kids[0].value():
+                        retn[name] = kid.getPosInfo()
+                else:
+                    name = kid.kids[0].value()
+                    retn[name] = kid.getPosInfo()
+
+            if isinstance(kid, s_ast.ForLoop):
+                it = kid.kids[0]
+
+                if isinstance(it, s_ast.VarList):
+                    for kidname in it.value():
+                        retn[kidname] = kid.getPosInfo()
+                else:
+                    retn[kid.kids[0].value()] = kid.kids[0].getPosInfo()
+
+            todo.extend(kid.kids)
+
+        return retn
+
+    def getTopLevelDefs(self, query):
         '''
         Scan through a parsed query and pull out top level function defs,
         number of args, etc so we can shovel that into the onhover handlers,
@@ -118,10 +166,24 @@ class StormLanguageServer(LanguageServer):
                     args.append(info)
 
                 self.completions['functions'][name] = {
-                    'body': kid.kids[2].getAstText(),
                     'start': pos['lines'][0],
                     'end': pos['lines'][1],
-                    'args': args
+                    'colstart': pos['columns'][0],
+                    'colend': pos['columns'][0],
+                    'body': kid.kids[2].getAstText(),
+                    'args': args,
+                    'vars': self._collectFuncVars(kid)
+                }
+
+            elif isinstance(kid, s_ast.SetVarOper):
+                name = kid.kids[0].getAstText()
+                pos = kid.getPosInfo()
+
+                self.completions['globals'][name] = {
+                    'start': pos['lines'][0],
+                    'end': pos['lines'][1],
+                    'colstart': pos['columns'][0],
+                    'colend': pos['columns'][0]
                 }
 
         return warnings
@@ -232,7 +294,7 @@ class StormLanguageServer(LanguageServer):
         try:
             query = s_parser.parseQuery(document.source)
             self.query = query
-            diagnostics.extend(self.getFuncDefs(query))
+            diagnostics.extend(self.getTopLevelDefs(query))
             # cleanliness is next to godliness
             diagnostics.extend(self.cleanCheck(query))
         except s_exc.BadSyntax as e:
@@ -363,51 +425,31 @@ async def did_change(ls: StormLanguageServer, params: types.DidOpenTextDocumentP
     ls.parse(doc)
 
     for uri, (version, diagnostics) in ls.diagnostics.items():
-        ls.publish_diagnostics(uri=uri, version=version, diagnostics=diagnostics)
+        ls.text_document_publish_diagnostics(
+            types.PublishDiagnosticsParams(
+                uri=uri,
+                version=version,
+                diagnostics=diagnostics,
+            )
+        )
 
 
 @server.feature(types.TEXT_DOCUMENT_DOCUMENT_SYMBOL)
 async def document_symbol(ls: StormLanguageServer, params: types.DocumentSymbolParams):
+    '''
+    This is not for autocomplete. This is for Symbol Explorers like aerial.nvim.
+    '''
     if not ls.query:
         return None
 
     retn = []
 
     # Top level pass for globals and functions
-    for kid in ls.query.kids:
-        await asyncio.sleep(0)
-        if isinstance(kid, s_ast.Function):
-            pos = kid.getPosInfo()
-            retn.append(
-                types.DocumentSymbol(
-                    name=kid.kids[0].value(),
-                    kind=types.SymbolKind.Function,
-                    range=types.Range(
-                        start=types.Position(line=pos['lines'][0]-1, character=0),
-                        end=types.Position(line=pos['lines'][1]-1, character=0),
-                    ),
-                    selection_range=types.Range(
-                        start=types.Position(line=pos['lines'][0]-1, character=0),
-                        end=types.Position(line=pos['lines'][1]-1, character=0),
-                    )
-                )
-            )
-        elif isinstance(kid, s_ast.SetVarOper):
-            pos = kid.getPosInfo()
-            retn.append(
-                types.DocumentSymbol(
-                    name=kid.kids[0].value(),
-                    kind=types.SymbolKind.Variable,
-                    range=types.Range(
-                        start=types.Position(line=pos['lines'][0]-1, character=0),
-                        end=types.Position(line=pos['lines'][1]-1, character=0),
-                    ),
-                    selection_range=types.Range(
-                        start=types.Position(line=pos['lines'][0]-1, character=0),
-                        end=types.Position(line=pos['lines'][1]-1, character=0),
-                    )
-                )
-            )
+    for func, info in ls.completions['functions'].items():
+        retn.append(makeDocSymbol(func, types.SymbolKind.Function, info))
+
+    for gvar, info in ls.completions['globals'].items():
+        retn.append(makeDocSymbol(gvar, types.SymbolKind.Variable, info))
 
     return retn
 
@@ -499,7 +541,8 @@ async def loadCompletions(core):
         'formtypes': {},
         'props': {},
         'cmds': {},
-        'functions': {}
+        'functions': {},
+        'globals': {}
     }
     for (path, lib) in s_stormtypes.registry.iterLibs():
         base = '.'.join(('lib',) + path)
@@ -577,6 +620,7 @@ async def didChangeConfiguration(ls: StormLanguageServer, params: types.DidChang
     # This is mostly here to prevent an error message in the lsp log
     pass
 
+
 @server.feature(types.INITIALIZE)
 async def lsinit(ls: StormLanguageServer, params: types.InitializeParams):
     '''
@@ -586,7 +630,7 @@ async def lsinit(ls: StormLanguageServer, params: types.InitializeParams):
     not existing even though it totally does, all because loadCompletions has not
     finished running
     '''
-    config = await ls.get_configuration_async(
+    config = await ls.workspace_configuration_async(
         types.ConfigurationParams(
             items=[
                 types.ConfigurationItem(section='datadir')
@@ -599,7 +643,9 @@ async def lsinit(ls: StormLanguageServer, params: types.InitializeParams):
     else:
         datadir = pathlib.Path(config[0])
 
-    ls.show_message_log(f'Loading completions from {datadir}')
+    ls.window_log_message(
+        types.LogMessageParams(type=types.MessageType.Info, message=f'Loading completions from {datadir}')
+    )
 
     cache = (datadir / 'completions.mpk').absolute()
 
@@ -611,12 +657,18 @@ async def lsinit(ls: StormLanguageServer, params: types.InitializeParams):
         completions = s_msgpack.un(cache.read_bytes())
 
         if (version := completions['version']) != s_version.verstring:
-            ls.show_message(f'Updating completion cache from {version} to {s_version.verstring}')
+            ls.window_log_message(
+                types.LogMessageParams(type=types.MessageType.Info, message=f'Updating completion cache from {version} to {s_version.verstring}')
+            )
             completions = await saveCompletions(cache)
 
     ls.completions = completions
+    if 'globals' not in ls.completions:
+        ls.completions['globals'] = {}
 
-    ls.show_message('storm ready')
+    ls.window_log_message(
+        types.LogMessageParams(type=types.MessageType.Info, message='storm ready')
+    )
 
 
 def wordAtCursor(lineNum, line, charAt):
@@ -667,14 +719,29 @@ async def autocomplete(ls: StormLanguageServer, params: types.CompletionParams):
                             tags=[] if not valu.get('deprecated', False) else depr
                         )
                     )
-            for name, valu in ls.completions.get('functions', {}).items():
+            for name, valu in ls.completions.get('globals', {}).items():
                 name = f'${name}'
                 if name.startswith(word):
-                    kind = types.CompletionItemKind.Function
                     retn.append(
                         types.CompletionItem(
                             label=name,
-                            kind=kind,
+                            kind=types.CompletionItemKind.Variable,
+                            text_edit=types.TextEdit(
+                                new_text=name,
+                                range=rng,
+                            ),
+                        )
+                    )
+
+            # TODO: would be quicker to have some kind of interval index to immediately jump
+            # to the right function
+            for funcname, valu in ls.completions.get('functions', {}).items():
+                name = f'${funcname}'
+                if name.startswith(word):
+                    retn.append(
+                        types.CompletionItem(
+                            label=name,
+                            kind=types.CompletionItemKind.Function,
                             # Maybe the detail should be the function body? Feels kinda excessive
                             text_edit=types.TextEdit(
                                 new_text=name,
@@ -686,7 +753,6 @@ async def autocomplete(ls: StormLanguageServer, params: types.CompletionParams):
                 end = valu['end']
                 if start <= line < end:
                     args = valu['args']
-                    # TODO: we could also recurse down and find any SetVar opers?
                     # TODO: Like the issue noted later with commands, we could add our own completion
                     # type here for parameter (or perhaps that's better left to semantic highlighting?)
 
@@ -703,10 +769,35 @@ async def autocomplete(ls: StormLanguageServer, params: types.CompletionParams):
                                     )
                                 )
                             )
+                    vars = ls.completions['functions'][funcname]['vars']
+                    for varname, info in vars.items():
+                        compname = f'${varname}'
+                        if compname.startswith(word):
+                            retn.append(
+                                types.CompletionItem(
+                                    label=compname,
+                                    kind=types.CompletionItemKind.Variable,
+                                    text_edit=types.TextEdit(
+                                        new_text=compname,
+                                        range=rng,
+                                    )
+                                )
+                            )
 
-            # TODO: detect what function we're in and populate variables based on that
-            # TODO: also add global variables to this
-
+            # add a few of the predefined ones.
+            # TODO: Check for others
+            for name in ('$node', '$path'):
+                if name.startswith(word):
+                    retn.append(
+                        types.CompletionItem(
+                            label=name,
+                            kind=types.CompletionItemKind.Variable,
+                            text_edit=types.TextEdit(
+                                new_text=name,
+                                range=rng,
+                            )
+                        )
+                    )
         else:
             text = word.strip()
 
@@ -724,7 +815,6 @@ async def autocomplete(ls: StormLanguageServer, params: types.CompletionParams):
                                 range=rng,
                             ),
                             tags=[] if not valu.get('deprecated', False) else depr
-                            # tags=[types.CompletionItemTag.Deprecated]
                         )
                     )
             props = ls.completions.get('props', {})
@@ -747,8 +837,7 @@ async def autocomplete(ls: StormLanguageServer, params: types.CompletionParams):
             for name, valu in cmds.items():
                 if name.startswith(text):
                     # TODO: as part of the LS protocol python pack we could define a custom type
-                    # and use that here, but it's not yet in a proper release, so for now we
-                    # gotta go with something not as accurate.
+                    # and use that here? Would be annoying though
                     retn.append(
                         types.CompletionItem(
                             label=name,
