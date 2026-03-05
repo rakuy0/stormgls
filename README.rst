@@ -29,9 +29,9 @@ To Do List
 - Function call semantics (we could detect things like function calls not matching the number of parameters, maybe show what kind of a function something is?)
 - renaming would be cool.
 - codeLens for some contextual information
-    -  we have all the doc info for things like API parameters that we could add in?
+    - we have all the doc info for things like API parameters that we could add in?
     - Could that be useful for creating a rudimentary type system for storm?
-- edges in completions (when we're in light edge syntax)
+- variable names in edge autocompletion
 - DIAGNOSTIC - Usage of undeclared variable
 - DIAGNOSTIC - return outside of function warning?
 - Configurable warnings/errors
@@ -41,6 +41,9 @@ To Do List
 - detect that a function doesn't do anything (no return/node lift/etc)?
 - pycharm and vscode integrations?
 - synapse 3.x compat?
+- local variable autocomplete not working in if statement conditionals?
+- One visitor pattern to rule them all? Would help with finding undeclared variables
+- wrap a bunch of the lsprotocol.types calls so we don't have to make things a bit more readable
 
 Installation
 ------------

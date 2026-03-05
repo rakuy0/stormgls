@@ -28,6 +28,8 @@ LSSOURCE = "stormgls"
 
 CWD = pathlib.Path(__file__).parent.absolute()
 
+EDGEOPENS = ('-(', '+(', '<(')
+
 class TokenModifier(enum.IntFlag):
     deprecated = enum.auto()
     readonly = enum.auto()
@@ -542,7 +544,8 @@ async def loadCompletions(core):
         'props': {},
         'cmds': {},
         'functions': {},
-        'globals': {}
+        'globals': {},
+        'edges': {}
     }
     for (path, lib) in s_stormtypes.registry.iterLibs():
         base = '.'.join(('lib',) + path)
@@ -590,6 +593,11 @@ async def loadCompletions(core):
                 'deprecated': propinfo.get('deprecated', False),
                 'type': propinfo.get('type', {})
             }
+
+    for edge in model.get('edges', ()):
+        einfo, opts = edge
+        src, verb, dst = einfo
+        completions['edges'][tuple(einfo)] = opts
 
     fake = FakeRunt(model)
     for name, ctor in core.stormcmds.items():
@@ -698,158 +706,209 @@ async def autocomplete(ls: StormLanguageServer, params: types.CompletionParams):
     retn = []
     depr = [types.CompletionItemTag.Deprecated,]
     # TODO: we can probably avoid the default object construction on a lot of these
-    if atCursor:
-        word, rng = atCursor
-        if word[0] == '$':
-            for name, valu in ls.completions.get('libs', {}).items():
-                if name.startswith(word):
-                    kind = types.CompletionItemKind.Property
-                    if isinstance(valu.get('type'), dict):
-                        if valu['type'].get('type') == 'function':
-                            kind = types.CompletionItemKind.Function
-                    retn.append(
-                        types.CompletionItem(
-                            label=name,
-                            kind=kind,
-                            detail=valu.get('doc'),
-                            text_edit=types.TextEdit(
-                                new_text=name,
-                                range=rng,
-                            ),
-                            tags=[] if not valu.get('deprecated', False) else depr
-                        )
-                    )
-            for name, valu in ls.completions.get('globals', {}).items():
-                name = f'${name}'
-                if name.startswith(word):
-                    retn.append(
-                        types.CompletionItem(
-                            label=name,
-                            kind=types.CompletionItemKind.Variable,
-                            text_edit=types.TextEdit(
-                                new_text=name,
-                                range=rng,
-                            ),
-                        )
-                    )
 
-            # TODO: would be quicker to have some kind of interval index to immediately jump
-            # to the right function
-            for funcname, valu in ls.completions.get('functions', {}).items():
-                name = f'${funcname}'
-                if name.startswith(word):
-                    retn.append(
-                        types.CompletionItem(
-                            label=name,
-                            kind=types.CompletionItemKind.Function,
-                            # Maybe the detail should be the function body? Feels kinda excessive
-                            text_edit=types.TextEdit(
-                                new_text=name,
-                                range=rng,
-                            ),
-                        )
-                    )
-                start = valu['start']
-                end = valu['end']
-                if start <= line < end:
-                    args = valu['args']
-                    # TODO: Like the issue noted later with commands, we could add our own completion
-                    # type here for parameter (or perhaps that's better left to semantic highlighting?)
+    if not atCursor:
+        return types.CompletionList(is_incomplete=False, items=[])
 
-                    for arg in args:
-                        argname = f"${arg['name']}"
-                        if argname.startswith(word):
-                            retn.append(
-                                types.CompletionItem(
-                                    label=argname,
-                                    kind=types.CompletionItemKind.Variable,
-                                    text_edit=types.TextEdit(
-                                        new_text=argname,
-                                        range=rng,
-                                    )
-                                )
-                            )
-                    vars = ls.completions['functions'][funcname]['vars']
-                    for varname, info in vars.items():
-                        compname = f'${varname}'
-                        if compname.startswith(word):
-                            retn.append(
-                                types.CompletionItem(
-                                    label=compname,
-                                    kind=types.CompletionItemKind.Variable,
-                                    text_edit=types.TextEdit(
-                                        new_text=compname,
-                                        range=rng,
-                                    )
-                                )
-                            )
+    # in edge has to come first since you can have variables in edge traversal
 
-            # add a few of the predefined ones.
-            # TODO: Check for others
-            for name in ('$node', '$path'):
-                if name.startswith(word):
-                    retn.append(
-                        types.CompletionItem(
-                            label=name,
-                            kind=types.CompletionItemKind.Variable,
-                            text_edit=types.TextEdit(
-                                new_text=name,
-                                range=rng,
-                            )
-                        )
-                    )
-        else:
-            text = word.strip()
+    word, rng = atCursor
+    inEdge = False
+    start = rng.start.character
+    edgestart = ''
+    if start > 1:
+        edgestart = doc.lines[line][(start-2):start]
+        inEdge = edgestart in EDGEOPENS
 
-            # if it's dumb but it works, how dumb is it really?
-            formtypes = ls.completions.get('formtypes', {})
-            for name, valu in formtypes.items():
-                if name.startswith(text):
+    if inEdge:
+        text = word.strip()
+        # way to filter this down?
+        rng.start.character -= 2
+        for einfo, opts in ls.completions.get('edges', {}).items():
+            src, verb, dst = einfo
+            if src is None:
+                src = '*'
+            if dst is None:
+                dst = '*'
+
+            if verb.startswith(text):
+                new_doc = f'{src} -({verb})> {dst}'
+                if doc := opts.get('doc', ''):
+                    new_doc += '\n\n' + doc
+
+                newTexts = []
+                if edgestart == '-(':
+                    newTexts.append(f'-({verb})>')
+                elif edgestart == '+(':
+                    newTexts.append(f'+({verb})>')
+                elif edgestart == '<(':
+                    newTexts.append(f'<({verb})-')
+                    newTexts.append(f'<({verb})+')
+
+                # TODO: Also add in local variables
+                for nt in newTexts:
                     retn.append(
                         types.CompletionItem(
-                            label=name,
-                            kind=types.CompletionItemKind.Field,
-                            detail=valu.get('doc', ''),
-                            text_edit=types.TextEdit(
-                                new_text=name,
-                                range=rng,
-                            ),
-                            tags=[] if not valu.get('deprecated', False) else depr
-                        )
-                    )
-            props = ls.completions.get('props', {})
-            for name, valu in props.items():
-                if name.startswith(text):
-                    retn.append(
-                        types.CompletionItem(
-                            label=name,
+                            label=nt,
                             kind=types.CompletionItemKind.Property,
-                            detail=valu.get('doc', ''),
+                            detail=new_doc,
                             text_edit=types.TextEdit(
-                                new_text=name,
+                                new_text=nt,
                                 range=rng,
                             ),
-                            tags=[] if not valu.get('deprecated', False) else depr
+                            tags=[] if not opts.get('deprecated', False) else depr
                         )
                     )
+    elif word[0] == '$':
+        for name, valu in ls.completions.get('libs', {}).items():
+            if name.startswith(word):
+                kind = types.CompletionItemKind.Property
+                if isinstance(valu.get('type'), dict):
+                    if valu['type'].get('type') == 'function':
+                        kind = types.CompletionItemKind.Function
+                retn.append(
+                    types.CompletionItem(
+                        label=name,
+                        kind=kind,
+                        detail=valu.get('doc'),
+                        text_edit=types.TextEdit(
+                            new_text=name,
+                            range=rng,
+                        ),
+                        tags=[] if not valu.get('deprecated', False) else depr
+                    )
+                )
+        for name, valu in ls.completions.get('globals', {}).items():
+            name = f'${name}'
+            if name.startswith(word):
+                retn.append(
+                    types.CompletionItem(
+                        label=name,
+                        kind=types.CompletionItemKind.Variable,
+                        text_edit=types.TextEdit(
+                            new_text=name,
+                            range=rng,
+                        ),
+                    )
+                )
 
-            cmds = ls.completions.get('cmds', {})
-            for name, valu in cmds.items():
-                if name.startswith(text):
-                    # TODO: as part of the LS protocol python pack we could define a custom type
-                    # and use that here? Would be annoying though
-                    retn.append(
-                        types.CompletionItem(
-                            label=name,
-                            kind=types.CompletionItemKind.Function,
-                            detail=valu.get('doc', ''),
-                            text_edit=types.TextEdit(
-                                new_text=name,
-                                range=rng
-                            ),
-                            tags=[] if not valu.get('deprecated', False) else depr
+        # TODO: would be quicker to have some kind of interval index to immediately jump
+        # to the right function
+        for funcname, valu in ls.completions.get('functions', {}).items():
+            name = f'${funcname}'
+            if name.startswith(word):
+                retn.append(
+                    types.CompletionItem(
+                        label=name,
+                        kind=types.CompletionItemKind.Function,
+                        # Maybe the detail should be the function body? Feels kinda excessive
+                        text_edit=types.TextEdit(
+                            new_text=name,
+                            range=rng,
+                        ),
+                    )
+                )
+            start = valu['start']
+            end = valu['end']
+            if start <= line < end:
+                args = valu['args']
+                # TODO: Like the issue noted later with commands, we could add our own completion
+                # type here for parameter (or perhaps that's better left to semantic highlighting?)
+
+                for arg in args:
+                    argname = f"${arg['name']}"
+                    if argname.startswith(word):
+                        retn.append(
+                            types.CompletionItem(
+                                label=argname,
+                                kind=types.CompletionItemKind.Variable,
+                                text_edit=types.TextEdit(
+                                    new_text=argname,
+                                    range=rng,
+                                )
+                            )
+                        )
+                vars = ls.completions['functions'][funcname]['vars']
+                for varname, info in vars.items():
+                    compname = f'${varname}'
+                    if compname.startswith(word):
+                        retn.append(
+                            types.CompletionItem(
+                                label=compname,
+                                kind=types.CompletionItemKind.Variable,
+                                text_edit=types.TextEdit(
+                                    new_text=compname,
+                                    range=rng,
+                                )
+                            )
+                        )
+
+        # add a few of the predefined ones.
+        # TODO: Check for others
+        for name in ('$node', '$path'):
+            if name.startswith(word):
+                retn.append(
+                    types.CompletionItem(
+                        label=name,
+                        kind=types.CompletionItemKind.Variable,
+                        text_edit=types.TextEdit(
+                            new_text=name,
+                            range=rng,
                         )
                     )
+                )
+    else:
+        text = word.strip()
+
+        # if it's dumb but it works, how dumb is it really?
+        formtypes = ls.completions.get('formtypes', {})
+        for name, valu in formtypes.items():
+            if name.startswith(text):
+                retn.append(
+                    types.CompletionItem(
+                        label=name,
+                        kind=types.CompletionItemKind.Field,
+                        detail=valu.get('doc', ''),
+                        text_edit=types.TextEdit(
+                            new_text=name,
+                            range=rng,
+                        ),
+                        tags=[] if not valu.get('deprecated', False) else depr
+                    )
+                )
+        props = ls.completions.get('props', {})
+        for name, valu in props.items():
+            if name.startswith(text):
+                retn.append(
+                    types.CompletionItem(
+                        label=name,
+                        kind=types.CompletionItemKind.Property,
+                        detail=valu.get('doc', ''),
+                        text_edit=types.TextEdit(
+                            new_text=name,
+                            range=rng,
+                        ),
+                        tags=[] if not valu.get('deprecated', False) else depr
+                    )
+                )
+
+        cmds = ls.completions.get('cmds', {})
+        for name, valu in cmds.items():
+            if name.startswith(text):
+                # TODO: as part of the LS protocol python pack we could define a custom type
+                # and use that here? Would be annoying though
+                retn.append(
+                    types.CompletionItem(
+                        label=name,
+                        kind=types.CompletionItemKind.Function,
+                        detail=valu.get('doc', ''),
+                        text_edit=types.TextEdit(
+                            new_text=name,
+                            range=rng
+                        ),
+                        tags=[] if not valu.get('deprecated', False) else depr
+                    )
+                )
 
     return types.CompletionList(is_incomplete=False, items=retn)
 
