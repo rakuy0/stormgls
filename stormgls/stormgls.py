@@ -88,7 +88,7 @@ class StormLanguageServer(LanguageServer):
         self.diagnostics = {}
         self.query = None
         self.completions = {
-            'version': s_version.verstring,
+            'version': s_version.version,
             'libs': {},
             'formtypes': {},
             'props': {},
@@ -536,7 +536,7 @@ async def loadCompletions(core):
     # TODO: Maybe just change these to properties of the server?
     # TODO: Also separate out interfaces?
     completions = {
-        'version': s_version.verstring,
+        'version': s_version.version,
         'libs': {},
         'formtypes': {},
         'props': {},
@@ -656,9 +656,9 @@ async def lsinit(ls: StormLanguageServer, params: types.InitializeParams):
         # ls.show_message(f'Loading {cache} {cache.stat().st_size}')
         completions = s_msgpack.un(cache.read_bytes())
 
-        if (version := completions['version']) != s_version.verstring:
+        if (version := completions['version']) != s_version.version:
             ls.window_log_message(
-                types.LogMessageParams(type=types.MessageType.Info, message=f'Updating completion cache from {version} to {s_version.verstring}')
+                types.LogMessageParams(type=types.MessageType.Info, message=f'Updating completion cache from {version} to {s_version.version}')
             )
             completions = await saveCompletions(cache)
 
